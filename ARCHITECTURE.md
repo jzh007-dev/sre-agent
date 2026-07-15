@@ -162,13 +162,47 @@ class ToolMeta:
     cost_hint: Literal["cheap", "expensive"]  # affects caching policy
     timeout_seconds: int
     idempotency_key: Optional[str]            # required for WRITE
+    undo_tool: Optional[str]                  # name of the tool that reverses this one
+    undo_semantics: Literal["exact", "forward_fix", "none"]  # what "undo" means for this tool
 ```
+
+**Undo semantics per side-effect class**:
+
+| Tool | `undo_tool` | `undo_semantics` | Meaning |
+|---|---|---|---|
+| `propose_rollback` | `propose_rollback` | `forward_fix` | "Undo" is another rollback (to the version we came from), not a state restore — the deploy history is append-only |
+| `scale_service` | `scale_service` | `exact` | Idempotent reverse — call with the old replica count |
+| `send_notification` | — | `none` | Notifications can't be un-sent; gate enforces two-person approval as compensating control |
+| `query_metrics` / `query_logs` | — | — | READ tools don't need undo |
+
+Undo is **not** automatic. The agent surfaces the undo path in its report; a human triggers it via the same gate (Temporal signal → approval). This matches production SRE reality — automated rollback of automated rollback is how you get into 3am compounded incidents.
 
 ### 6. Data layer
 
 - **Postgres**: primary store for state, audit, cost logs, tenant meta.
-- **pgvector**: episodic memory (past incidents with embeddings + structured metadata).
+- **pgvector**: episodic memory (past incidents with embeddings + structured metadata) + Runbook RAG chunks (see [RAG.md](./RAG.md)).
 - **Redis**: prompt cache (Anthropic cache is 5-min; Redis is our L2 for cross-session), hot topology data, LLM response cache for identical tool-output prompts.
+
+#### Memory layering
+
+Three distinct memory tiers, deliberately kept separate:
+
+| Tier | Storage | Lifetime | What it holds | Retrieved when |
+|---|---|---|---|---|
+| **Working state** (short-term) | Temporal workflow state + LangGraph `IncidentState` | Duration of the incident (minutes to hours) | Tool call results so far, hypotheses generated, gate decisions, transcript | Every node — passed as function arg |
+| **Episodic memory** (long-term, learned) | pgvector `past_incidents` | Permanent (with 90-day staleness flag) | Prior incident summaries, root causes, resolutions | `triage` node prefetches top-3 similar; `hypothesize` cites priors |
+| **Knowledge base** (long-term, authored) | pgvector `runbook_chunks` | Permanent (wiki-sourced, weekly sync) | Human-written runbooks, postmortems, playbooks | `collect` / `hypothesize` retrieve on demand |
+
+**Why no "sliding window" like a chatbot**: incidents aren't multi-turn conversations. Each incident is a single execution of the graph with a bounded state object; there is no user turn to compress. Temporal keeps the workflow event history, which is our replay mechanism — not a conversation window.
+
+**Long-term memory eviction / staleness**:
+- Episodic memory entries older than 90 days get a `stale=true` flag; retrieval still finds them but the LLM is prompted to weight them lower.
+- Runbook chunks tied to `doc_version`; when the doc updates, old chunks are hard-deleted (see [RAG.md](./RAG.md) incremental update).
+- No LRU — storage is cheap, and old incidents remain diagnostically useful ("this bug pattern recurred from 2 years ago").
+
+**Multi-tenant memory isolation (Tier 2 seam)**: every memory row has `tenant_id`; retrieval is `WHERE tenant_id = current_tenant() AND ...`. In Tier 1.5 there's one tenant, so filter is a no-op. Adding a second tenant is a config change, not a data migration — the seam is already in the schema.
+
+**Preference / user-model memory (chatbot pattern)**: **not applicable to this system**. SRE agent operates on incidents (system events), not on users. If we ever added a "notify oncall based on their preference for Slack vs PagerDuty" feature, that'd be a `users` table with structured columns, not a memory retrieval problem.
 
 ### 7. Observability
 
@@ -247,6 +281,26 @@ docker-compose.yaml
 Anthropic API + Langfuse Cloud are the only external dependencies.
 
 Estimated running cost: **$10-30/month** (Anthropic API dominates; everything else is free tier).
+
+---
+
+## Target scale
+
+| Dimension | Tier 1.5 target | Tier 2 (aspirational) |
+|---|---|---|
+| Alerts / day | ~50 (mostly during business hours, mock traffic + eval reruns) | 5k across a real fleet |
+| Peak alerts / minute | <10 | 100+ during a fleet-wide event |
+| Concurrent incidents | 1-3 | 20-50 |
+| Median incident duration | 60-90s (agent wall-clock) | Same — agent parallelism doesn't reduce per-incident latency past a floor |
+| p99 incident cost | <$0.40 | Same target with better model routing |
+| Runbook corpus | ~100 docs, ~3k chunks | ~2k docs, ~50k chunks |
+| Episodic memory | ~10k past incidents | ~1M |
+
+**Where Tier 1.5 breaks first as load grows** (from [TRADEOFFS.md](./TRADEOFFS.md) evolution paths):
+1. Single FastAPI worker at ~50 req/sec (add Kafka + horizontal scale)
+2. Single Temporal worker at ~20 concurrent incidents (add worker pool)
+3. pgvector past ~500k vectors (migrate to Qdrant/Milvus)
+4. Anthropic native cache 5-min TTL doesn't cover cross-session (add Redis L2)
 
 ---
 

@@ -203,7 +203,23 @@ Format for each entry:
 - **Cost**: agent capability is bounded by the pre-defined tool set; cannot handle "run this arbitrary PromQL I just came up with" scenarios without a new tool + sandbox.
 - **Reconsider when**: introducing any tool where an LLM-generated string is executed by an external engine — `run_promql`, `run_kubectl_read`, `run_python_snippet`. At that point, sandbox is required; the five-layer defense continues to apply on top.
 
-## 17. Frontend: none for POC (Slack + CLI only)
+## 17. Execution unit: incident, not conversation
+
+- **Decision**: each agent run is a **single-shot execution** over one incident. No multi-turn dialogue with the operator during the run. Operator's only interaction point is the approval gate.
+- **Alternatives**:
+  - (A) Multi-turn chatbot: operator asks follow-up questions, agent replies, iterate.
+  - (B) Notebook-style: agent shows partial results, operator directs next step.
+- **Why**: incident response has a definite goal (find root cause, propose action) with strict latency pressure. Multi-turn adds decision points where a tired 3am operator is a worse driver than the LLM's own graph. Approval-gate is where the human belongs, not "should I fetch the logs now?".
+- **Cost**: no "why did you do X?" mid-run — operator can only see the final report and the Langfuse trace. Interactive debugging happens post-incident.
+- **Reconsider when**: use case shifts from incident response to interactive investigation (e.g., "help me understand this weird metric pattern"), or when operators consistently want to steer mid-run.
+
+### Consequences for standard chatbot metrics
+
+- **Multi-turn task completion rate**: not directly applicable — our unit is `incident_resolved_correctly` (LLM-judge score ≥ 4), not `conversation_completed`.
+- **Sliding window / conversation memory**: not applicable — see [ARCHITECTURE.md](./ARCHITECTURE.md) §6 memory layering. The Temporal workflow state IS the "working memory" and has an event-history durability model, not a token-window one.
+- **Turn-level satisfaction**: replaced by per-phase eval assertions (see [EVAL.md](./EVAL.md)). Each phase has its own quality signal, which is *finer-grained* than turn-level user rating.
+
+## 18. Frontend: none for POC (Slack + CLI only)
 
 - **Decision**: incident reports post to Slack via webhook and print to CLI. No web UI.
 - **Alternatives**:
