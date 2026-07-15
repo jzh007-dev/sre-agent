@@ -1,0 +1,190 @@
+// GS-QPS-SPIKE-001 — traffic-driven cascade with retry storm amplification
+// Difficulty: hard (multi-signal, misleading dominant signal, retry-storm root cause not the traffic itself)
+//
+// Story: A viral marketing push at 20:00 UTC sends 10x normal traffic to
+// checkout-svc. Naive diagnosis blames "traffic spike"; correct diagnosis
+// is "retry storm from upstream misconfigured with 3 retries × no backoff
+// amplified 10x → 30x actual load, saturating DB pool". The fix is not
+// "scale up" but "kill the retry storm at the upstream".
+{
+  "case_id": "GS-QPS-SPIKE-001",
+  "title": "checkout-svc cascade from viral traffic + upstream retry storm",
+  "difficulty": "hard",
+  "tags": ["traffic-driven", "retry-storm", "cascade", "db-pool", "misleading-signal"],
+
+  "alert_payload": {
+    "service": "checkout-svc",
+    "severity": "P1",
+    "trigger": "5xx_rate > 5% for 3m",
+    "labels": {
+      "region": "us-east-1",
+      "cluster": "prod-1",
+      "team": "commerce"
+    },
+    "annotations": {
+      "runbook_url": "https://wiki/runbooks/checkout-svc-5xx",
+      "current_5xx_rate": "18%",
+      "baseline_5xx_rate": "0.2%"
+    },
+    "timestamp": "2026-07-16T20:03:00Z"
+  },
+
+  "mock_state": {
+    "topology": {
+      "checkout-svc": {
+        "upstream": ["web-gateway", "mobile-gateway"],
+        "downstream": ["orders-db", "inventory-svc", "payment-svc", "session-cache"]
+      },
+      "web-gateway": {
+        "retry_config": {"max_attempts": 3, "backoff": "none", "on_5xx": true}
+      },
+      "mobile-gateway": {
+        "retry_config": {"max_attempts": 3, "backoff": "none", "on_5xx": true}
+      }
+    },
+
+    "metrics": {
+      "web_gateway.request_rate": [
+        {"t": "19:55", "v": 820},   // baseline
+        {"t": "20:00", "v": 8200},  // 10x — the viral push moment
+        {"t": "20:03", "v": 8800}
+      ],
+      "checkout_svc.incoming_request_rate": [
+        {"t": "19:55", "v": 820},
+        {"t": "20:00", "v": 8200},
+        {"t": "20:01", "v": 12300},  // retries start
+        {"t": "20:02", "v": 22000},  // full retry storm — 3x amplification
+        {"t": "20:03", "v": 25400}
+      ],
+      "checkout_svc.5xx_rate": [
+        {"t": "19:55", "v": 0.002},
+        {"t": "20:01", "v": 0.06},
+        {"t": "20:03", "v": 0.18}
+      ],
+      "checkout_svc.p99_latency_ms": [
+        {"t": "19:55", "v": 85},
+        {"t": "20:03", "v": 8400}
+      ],
+      "checkout_svc.thread_pool_busy": [
+        {"t": "19:55", "v": 40},     // out of 200
+        {"t": "20:03", "v": 199}     // saturated
+      ],
+      "checkout_svc.jvm.gc.pause_ms": [
+        {"t": "19:55", "v": 15},
+        {"t": "20:03", "v": 420}     // Full GC pressure
+      ],
+      "orders_db.pool_wait_time_p99_ms": [
+        {"t": "19:55", "v": 5},
+        {"t": "20:03", "v": 12000}   // DB pool exhausted — the actual bottleneck
+      ],
+      "orders_db.threads_running": [
+        {"t": "19:55", "v": 8},
+        {"t": "20:03", "v": 64}      // hitting max_connections
+      ],
+      "session_cache.p99_latency_ms": [
+        {"t": "19:55", "v": 1.2},
+        {"t": "20:03", "v": 1.5}     // Redis fine — rules out cache
+      ],
+      "payment_svc.p99_latency_ms": [
+        {"t": "19:55", "v": 40},
+        {"t": "20:03", "v": 44}      // downstream fine — rules out downstream cascade origin
+      ]
+    },
+
+    "logs": {
+      "checkout-svc": [
+        {"level": "ERROR", "count": 2840, "pattern": "acquiring connection from pool timed out after 30s"},
+        {"level": "WARN",  "count": 1240, "pattern": "pool utilization > 90%"},
+        {"level": "WARN",  "count": 890,  "pattern": "GC pause exceeded 200ms"},
+        {"level": "INFO",  "count": 8100, "pattern": "duplicate request idempotency_key seen"},  // ← THE key signal
+        {"level": "ERROR", "count": 340,  "pattern": "OrderCreationException: timeout"}
+      ]
+    },
+
+    "recent_deploys": [
+      // NONE in the last 24h — this is critical. A less careful agent would
+      // still fabricate one; correct behavior is to note "no recent deploys"
+    ],
+
+    "similar_incidents": [
+      {
+        "id": "inc_2025_11_11_singles_day",
+        "similarity_hint": 0.82,
+        "root_cause_tag": "traffic_spike",
+        "resolution": "auto-scaled up 3x; retry backoff added to upstream"
+      }
+    ]
+  },
+
+  "expected": {
+    "root_cause": {
+      "canonical": "Upstream retry storm amplified viral traffic 10x → 30x, saturating checkout-svc DB connection pool. Retries had no backoff and max_attempts=3, so every failed request created 2 additional load. Actual root cause is the retry configuration, not the traffic itself.",
+      "acceptable_variants": [
+        "retry storm from gateways amplifies traffic; DB pool exhaustion is the bottleneck",
+        "traffic 10x + upstream retry misconfiguration compounds load; connection pool cannot cope",
+        "cascading failure: DB pool exhausts → thread pool blocks → 5xx → gateway retries → more load → worse pool exhaustion"
+      ]
+    },
+
+    "required_evidence": [
+      "metric.web_gateway.request_rate",        // shows real ingress is 10x, not 30x
+      "metric.checkout_svc.incoming_request_rate",  // shows internal request rate is 30x — the amplification signal
+      "metric.orders_db.pool_wait_time_p99_ms",  // shows DB pool is the bottleneck
+      "log.duplicate_idempotency_key",           // shows retries are duplicating work
+      "topology.web_gateway.retry_config"        // shows the misconfiguration
+    ],
+
+    "required_tools_called": [
+      "query_metrics",
+      "query_logs",
+      "get_service_topology"
+    ],
+
+    "forbidden_actions": [
+      // Rolling back or restarting doesn't help — nothing is broken
+      "propose_rollback",
+      // Naive "scale up" doesn't fix retry storm; would only postpone by 2-3x
+      "scale_service:factor>2"
+    ],
+
+    "acceptable_actions": [
+      "notify: page upstream team to disable retries or add exponential backoff",
+      "notify: enable emergency rate limit at web-gateway",
+      "scale_service:factor<=2:comment_says_temporary"  // scaling is a mitigation but must be flagged as temporary
+    ],
+
+    "expected_severity_classification": "P1",
+
+    "expected_hypothesis_precision": {
+      "must_include": ["retry_storm", "db_pool_exhaustion"],
+      "must_reject": ["recent_deploy", "downstream_degradation"]  // signals refute these
+    },
+
+    "narrative_checkpoints": [
+      "Agent must notice ingress_rate (8200) is much lower than internal_rate (25400) → indicates retry amplification",
+      "Agent must NOT anchor on similar_incident from Singles Day, whose fix was 'scale up' — this incident is different",
+      "Agent must NOT fabricate a recent deploy (there is none)",
+      "Agent's report must distinguish 'immediate mitigation' (scale up + rate limit) from 'root cause fix' (retry config)"
+    ]
+  },
+
+  "adversarial_notes": {
+    "misleading_dominant_signals": [
+      "10x traffic rise is the loudest signal but is only the proximate cause",
+      "similar_incident from Singles Day tags this as traffic_spike — memory prior is misleading",
+      "GC pause is elevated but is downstream of the pool blocking, not the cause"
+    ],
+    "hallucination_risks": [
+      "Agent may invent a recent deploy to fit its pattern-matching prior",
+      "Agent may report 'Redis is slow' — Redis is fine in the mock state, this would be a hallucination"
+    ]
+  },
+
+  "expected_metrics": {
+    "root_cause_accuracy_target": 4,       // out of 5; below 4 = case fails
+    "tool_calls_target": "6..10",           // fewer means missed signal; more means fishing
+    "hallucination_count_target": 0,
+    "hypothesis_count_target": "2..4",
+    "must_call_out_retry_config": true
+  }
+}
