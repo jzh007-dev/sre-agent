@@ -107,15 +107,78 @@ Fill this file as the project evolves. Every checkbox is a piece of interview ev
 - [ ] **Prompt version** stamped on every trace
 - [ ] Data point ready: "top 3 error classes and their frequency"
 
-## 10. Safety & permissions
+## 10. Safety & prompt injection defense
+
+See [SECURITY.md](./SECURITY.md) for the full threat model and five-layer defense stack. This checklist tracks implementation.
+
+### 10.1 Layer 1 — Message construction (data isolation)
+
+- [ ] **Untrusted-content XML wrapping** — every log/metric/label/memory item wrapped in `<untrusted_data source="...">` — evidence: `context_builder.py`
+- [ ] **System prompt anti-injection clause** — explicit instruction to never follow content inside untrusted tags
+- [ ] **Sanitization**: strip C0/C1 control chars, zero-width, homoglyphs; escape fake closing tags; normalize NFC
+- [ ] **Per-item length cap** (4KB); truncation marker on overflow
+- [ ] Data point: cases where fake `</untrusted_data>` closing was attempted → 100% escaped
+
+### 10.2 Layer 2 — Structured output constraints
+
+- [ ] **All node outputs are Pydantic / JSON Schema typed** — no free-form text-with-tool-calls
+- [ ] **Enum constraints** on high-risk fields (`target_service` ∈ known_services)
+- [ ] **Bounded list sizes** (max 4 hypotheses, max 3 proposed actions)
+- [ ] **Retry-on-schema-fail** with error fed back to LLM
+- [ ] Data point: schema-fail rate over 100 runs — number: `_____ %`
+
+### 10.3 Layer 3 — Second-model review
+
+- [ ] **Reviewer LLM** implemented, different family from primary — pair: `_____ / _____`
+- [ ] **Reviewer prompt** with 5-point rubric — file: `prompts/reviewer.jinja2`
+- [ ] **PROCEED / FLAG / BLOCK verdict** enforced in workflow
+- [ ] **BLOCK escalates to human**, does not proceed silently
+- [ ] Data point: FLAG rate; BLOCK rate; false-block rate — numbers: `_____`
+
+### 10.4 Layer 4 — Gate (approval workflow)
 
 - [ ] **Tool side-effect classification** — every tool tagged READ / WRITE / DESTRUCTIVE
-- [ ] **Human-in-the-loop** for WRITE via Temporal signal
-- [ ] **Dry-run mandatory** for DESTRUCTIVE — evidence: `_____`
-- [ ] **Prompt injection defense** — structured parsing of log lines; second-model sanity check on suspicious tool inputs
-- [ ] **Adversarial cases in golden set** — count: `_____`
-- [ ] **Adversarial success rate** measured — target: 100%
-- [ ] **Audit log** on every action: `(incident_id, tool, args, actor, timestamp)`
+- [ ] **`preview_supported` flag** per WRITE tool — every WRITE either has native dry-run or requires two-person approval
+- [ ] **Native dry-run integration**: `kubectl --dry-run=server`, `terraform plan`, etc. — dry-run output attached to approval request
+- [ ] **Human-in-the-loop via Temporal signal** — kill test: workflow resumes cleanly after signal-wait
+- [ ] **Blast radius tier** computed per action (single-service / multi-service / cross-cluster)
+- [ ] **Audit chain** on every action: `(incident_id, tool, args, actor, timestamp, dry_run_hash, verdict)`
+
+### 10.5 Layer 5 — Egress filter
+
+- [ ] **Report is serialized from Pydantic**, not LLM-generated Markdown
+- [ ] **URL whitelist** enforced (runbook host, Grafana host, Slack) — regex evidence: `egress.py`
+- [ ] **Image tag stripping**
+- [ ] **Secret regex sanitize** (AWS keys, JWT, PEM blocks)
+- [ ] **Length cap** on report content
+
+### 10.6 Cross-cutting caps
+
+- [ ] **Per-incident cost cap** enforced with degradation path
+- [ ] **Max tool calls** enforced (20 across phases)
+- [ ] **Max iterations per node** enforced (5)
+- [ ] **Same-tool-same-args circuit breaker** implemented
+- [ ] Data point: cap-trip rate; false-trip rate on normal cases
+
+### 10.7 Adversarial eval coverage
+
+- [ ] **10 adversarial cases** in golden set (see [EVAL.md](./EVAL.md) adversarial matrix)
+- [ ] **Per-layer bypass rate** reported — target: 0% at L1-L5
+- [ ] **New injection payload class → new adversarial case** (workflow enforced)
+
+### 10.8 Documented gaps
+
+- [ ] **Known unguarded surfaces** listed in SECURITY.md and understood — able to speak to each in interview:
+  - Memory poisoning
+  - Chained multi-step attacks
+  - Prompt bloat DoS
+  - Reviewer-model bypass (shared training data)
+  - Supply chain
+
+### 10.9 Why NOT sandbox — able to articulate
+
+- [ ] Able to explain: tools have typed params; no LLM-generated string is executed by our system; sandbox is for code-execution scenarios; the five-layer stack targets *content interpretation* which is our actual attack surface
+- [ ] Able to state the trigger condition: adding a tool that executes an LLM-generated string (e.g., `run_promql(query: str)`) is when sandbox becomes necessary
 
 ---
 
@@ -148,12 +211,12 @@ These are the multi-dimensional stories that show up in senior interviews. Prepa
 - What defense you added
 - How the eval verifies the defense
 
-### N5. A safety story
+### N5. A safety / prompt-injection story
 
-- The most dangerous action the agent can take
-- The gate design
-- The failure mode you were most worried about
-- How you verified it
+- The realization that gate ≠ full defense
+- The five-layer stack and why each layer alone is insufficient
+- Concrete adversarial case that made you add a layer
+- The gap you *haven't* closed and why that's an honest choice, not a blind spot
 
 ### N6. An architecture decision you'd reverse
 

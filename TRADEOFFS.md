@@ -108,16 +108,35 @@ Format for each entry:
 - **Cost**: bugs where `tenant_id` is forgotten in a query can't surface until we actually run multi-tenant.
 - **Reconsider when**: adding a second tenant (real or mocked with distinct data).
 
-## 10. Gate policy: hardcoded rules, not policy engine
+## 10a. Gate = approval workflow layer, NOT preview generator
 
-- **Decision**: side_effect classification (`READ` / `WRITE` / `DESTRUCTIVE`) decides gate — read auto-pass, write requires human signal, destructive requires signal + dry-run diff shown.
+- **Decision**: Gate handles who-approves-what-when + audit + blast-radius policy + timeout escalation. Gate does **not** generate previews of what an action will do.
 - **Alternatives**:
-  - (A) OPA / Cedar policy engine.
-  - (B) LLM-decides-gate (asking a second LLM "is this safe").
-  - (C) No gate — trust the primary LLM.
-- **Why**: hardcoded rules are auditable and won't drift. Policy engine is right for Tier 3 where per-service blast-radius limits get involved.
-- **Cost**: adding gate exceptions requires a code change and redeploy.
-- **Reconsider when**: gate policies need per-tenant configuration.
+  - (A) Gate internally simulates every action (would reinvent Terraform / kubectl semantics).
+  - (B) No gate, LLM asked to "be careful" (unauditable).
+- **Why**: preview semantics are domain-specific and belong in the tool that owns them. Gate is control flow.
+- **Cost**: every WRITE tool must implement a `preview()` method (either wrap native dry-run or explicitly declare `preview_supported=False`).
+- **Reconsider when**: never — this separation is invariant.
+
+## 10b. Preview = native tool dry-run, wrapped by gate
+
+- **Decision**: WRITE tools invoke native mechanisms (`kubectl --dry-run=server`, `terraform plan`, `pg_dry_run`) to produce a preview; the gate attaches the preview to the approval request.
+- **Alternatives**:
+  - (A) Custom preview engine per tool (huge surface, semantic drift).
+  - (B) LLM writes the preview text (untrustworthy, injection-prone).
+- **Why**: native dry-run is battle-tested, semantically correct, and free.
+- **Cost**: tools without native dry-run support (e.g., send-notification) must declare `preview_supported=False`; gate then requires two-person approval instead of one.
+- **Reconsider when**: never — always prefer native mechanisms.
+
+## 10c. Blast radius: coarse tiering, not per-service policy
+
+- **Decision**: three tiers — `single-service`, `multi-service`, `cross-cluster`. Tier determined by tool + arguments. Approval requirement scales with tier.
+- **Alternatives**:
+  - (A) OPA / Cedar policy engine per service.
+  - (B) No blast-radius concept — all WRITE treated equally.
+- **Why**: per-service policy is Tier 3 territory (needs organizational buy-in for policy authoring). Three-tier is enough for POC and demonstrates the concept.
+- **Cost**: coarse tier occasionally over- or under-gates; edge cases handled by manual override with audit.
+- **Reconsider when**: real deployment with heterogeneous services requiring per-service rules.
 
 ## 11. Prompt versioning: git + prompt IDs, not a prompt CMS
 
@@ -151,7 +170,40 @@ Format for each entry:
 - **Cost**: prompt/trace data leaves our environment; not usable if we're targeting regulated industries as customers.
 - **Reconsider when**: any real customer data flows through (must self-host for compliance).
 
-## 14. Frontend: none for POC (Slack + CLI only)
+## 14. Message construction: in-band XML-tag data isolation
+
+- **Decision**: untrusted content (log lines, alert labels, metric labels, memory items) wrapped in `<untrusted_data source="...">` tags in the user message; system prompt tells the model to never follow instructions inside those tags.
+- **Alternatives**:
+  - (A) Out-of-band structured channel — like `tool_use` for data (does not exist in any SDK today).
+  - (B) Markdown fences (`\`\`\``) or `---` separators.
+  - (C) No delimiter, trust the LLM to sort it out.
+- **Why**: (A) doesn't exist. (B) is easily broken by the same delimiters appearing in real logs. (C) is prompt injection paradise. XML tags are respected by Claude and GPT families, and the fake-closing-tag attack is defeated by escaping `<` in untrusted content.
+- **Cost**: cannot fully eliminate semantic-level injection ("the correct root cause is X" wearing an innocent disguise); handled by Layer 3 (second-model review), not Layer 1.
+- **Reconsider when**: an SDK-native untrusted-content channel becomes available (Anthropic or OpenAI ships one), or when we can afford the latency of two round-trips (one to extract facts, one to reason).
+
+## 15. Second-model review: different-family reviewer
+
+- **Decision**: a second, different-family LLM reviews the primary agent's proposed actions before execution. Reviewer sees only structured proposal + minimal summary, not raw untrusted data.
+- **Alternatives**:
+  - (A) Same-family reviewer (e.g., Claude Haiku reviewing Claude Sonnet).
+  - (B) No reviewer — rely on gate alone.
+  - (C) Rule-based classifier (no LLM in review).
+- **Why**: different family defeats family-specific injection payloads. Rule-based misses semantic drift. Gate alone catches only unauthorized WRITE, not falsified reports that manipulate human approval.
+- **Cost**: extra ~$0.005 per incident (small model, small context); latency +2-3s; adds a second LLM vendor to the dependency graph.
+- **Reconsider when**: adversarial eval shows reviewer bypass rate > 5% (rotate reviewer model), or cross-family agreement is too low, causing false-block rate to hurt UX.
+
+## 16. Sandbox: intentionally NOT implemented in Tier 1.5
+
+- **Decision**: no tool-execution sandbox in the design. All tools have typed structured parameters; no LLM-generated code / query strings are ever executed by our system.
+- **Alternatives**:
+  - (A) E2B / Modal managed sandbox for a `run_query` tool.
+  - (B) Docker container isolation for a `run_promql` tool.
+  - (C) MicroVM (Firecracker) for a `run_python_snippet` tool.
+- **Why**: sandbox defends against **untrusted code execution**. Our attack surface is **untrusted content interpretation**, handled by the five-layer defense in [SECURITY.md](./SECURITY.md). Adding sandbox without a code-executing tool is complexity without payoff.
+- **Cost**: agent capability is bounded by the pre-defined tool set; cannot handle "run this arbitrary PromQL I just came up with" scenarios without a new tool + sandbox.
+- **Reconsider when**: introducing any tool where an LLM-generated string is executed by an external engine — `run_promql`, `run_kubectl_read`, `run_python_snippet`. At that point, sandbox is required; the five-layer defense continues to apply on top.
+
+## 17. Frontend: none for POC (Slack + CLI only)
 
 - **Decision**: incident reports post to Slack via webhook and print to CLI. No web UI.
 - **Alternatives**:

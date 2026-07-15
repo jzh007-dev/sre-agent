@@ -27,6 +27,7 @@ The full rationale, tradeoffs, and interview-mapped depth points are in the docs
 |---|---|
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | High-level design, component map, data flow, Tier 2/3 evolution paths |
 | [TRADEOFFS.md](./TRADEOFFS.md) | Every key decision with A/B alternatives and reasoning |
+| [SECURITY.md](./SECURITY.md) | Threat model, five-layer prompt injection defense, known gaps |
 | [EVAL.md](./EVAL.md) | Metrics, golden set spec, judge design, regression methodology |
 | [INTERVIEW_CHECKLIST.md](./INTERVIEW_CHECKLIST.md) | 10 depth dimensions with per-item checklist for interview prep |
 
