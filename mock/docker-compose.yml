@@ -1,0 +1,81 @@
+name: sre-agent-mock
+
+services:
+  # ─── Application services ─────────────────────────────────────────
+  checkout:
+    build:
+      context: services/checkout
+      dockerfile: Dockerfile
+    image: sre-agent-mock/checkout:latest
+    container_name: mock-checkout
+    environment:
+      SERVICE_NAME: checkout
+      SERVICE_VERSION: v1.0.0
+      LOG_LEVEL: INFO
+    ports:
+      - "18081:8000"
+    labels:
+      logging: vector           # ← Vector 只抓带这个 label 的容器
+      service: checkout
+    networks:
+      - mocknet
+    restart: unless-stopped
+
+  # ─── Metrics: Prometheus ─────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: mock-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "19090:9090"
+    networks:
+      - mocknet
+    restart: unless-stopped
+
+  # ─── Logs: ClickHouse + Vector ───────────────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: mock-clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    environment:
+      CLICKHOUSE_DB: sre
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      # init.sql runs once at first startup, creates database + tables.
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - clickhouse_data:/var/lib/clickhouse
+    ports:
+      - "18123:8123"   # HTTP interface (Vector + curl use this)
+      - "19000:9000"   # native TCP (clickhouse-client uses this)
+    networks:
+      - mocknet
+    restart: unless-stopped
+
+  vector:
+    image: timberio/vector:0.40.0-debian
+    container_name: mock-vector
+    volumes:
+      - ./vector/vector.yaml:/etc/vector/vector.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - mocknet
+    depends_on:
+      - clickhouse
+    restart: unless-stopped
+
+networks:
+  mocknet:
+    driver: bridge
+
+volumes:
+  clickhouse_data:

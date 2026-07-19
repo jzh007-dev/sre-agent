@@ -1,0 +1,92 @@
+# Vector pipeline: docker stdout logs → ClickHouse.
+#
+# Pipeline has 3 stages: source → transform → sink.
+# Vector's model is "events flow through", VRL (Vector Remap Language)
+# handles transforms — similar to Logstash filter but faster + typed.
+
+sources:
+  # Read stdout of every container labeled logging=vector.
+  docker:
+    type: docker_logs
+    # Only capture containers we labeled — avoids Vector reading its own logs.
+    include_labels:
+      - "logging=vector"
+
+transforms:
+  # Parse each raw log line (assumed to be JSON produced by our services).
+  parse_json:
+    type: remap
+    inputs: [docker]
+    source: |
+      # `.message` holds the raw line from docker.
+      parsed, err = parse_json(.message)
+      if err != null {
+        # Not JSON — drop or route elsewhere. For POC, tag and keep raw.
+        .parse_error = err
+        .parsed = false
+      } else {
+        # Merge parsed fields into event root.
+        . = merge!(., parsed)
+        .parsed = true
+      }
+
+  # Shape to match ClickHouse columns.
+  # Defaults required fields, packs a whitelist of extra fields into `extra` JSON.
+  shape:
+    type: remap
+    inputs: [parse_json]
+    source: |
+      # ts must be in CH DateTime64-friendly format ("YYYY-MM-DD HH:MM:SS.SSS", no Z).
+      # Service logs ship ISO "...T...Z" — normalize by stripping T/Z.
+      if .ts == null {
+        .ts = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S%.3f")
+      } else {
+        ts_str = to_string!(.ts)
+        ts_str = replace(ts_str, "T", " ")
+        ts_str = replace(ts_str, "Z", "")
+        .ts = ts_str
+      }
+      if .service == null      { .service = "unknown" }
+      if .version == null      { .version = "" }
+      if .level == null        { .level = "INFO" }
+      if .correlation_id == null { .correlation_id = "" }
+      if .msg == null          { .msg = "" }
+
+      # Preserve a whitelist of business-level extras as JSON blob.
+      # Add more fields here as services grow — cheaper than schema migration.
+      extras = {}
+      if exists(.order_id) { extras = set!(extras, ["order_id"], .order_id) }
+      if exists(.reason)   { extras = set!(extras, ["reason"],   .reason) }
+      .extra = encode_json(extras)
+
+      # Container metadata from Docker source.
+      .container_id = to_string(.container_id) ?? ""
+
+sinks:
+  clickhouse:
+    type: clickhouse
+    inputs: [shape]
+    endpoint: http://clickhouse:8123
+    database: sre
+    table: logs
+    # Batch small in POC for fast visibility; prod would do 1000+ / 1s.
+    batch:
+      max_events: 100
+      timeout_secs: 1
+    # Only forward the columns CH schema knows about.
+    encoding:
+      only_fields:
+        - ts
+        - service
+        - version
+        - level
+        - correlation_id
+        - msg
+        - endpoint
+        - method
+        - status
+        - duration_ms
+        - extra
+        - container_id
+    # Skip unknown columns cleanly if schema evolves.
+    skip_unknown_fields: true

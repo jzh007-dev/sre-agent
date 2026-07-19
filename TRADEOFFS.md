@@ -219,7 +219,22 @@ Format for each entry:
 - **Sliding window / conversation memory**: not applicable — see [ARCHITECTURE.md](./ARCHITECTURE.md) §6 memory layering. The Temporal workflow state IS the "working memory" and has an event-history durability model, not a token-window one.
 - **Turn-level satisfaction**: replaced by per-phase eval assertions (see [EVAL.md](./EVAL.md)). Each phase has its own quality signal, which is *finer-grained* than turn-level user rating.
 
-## 18. Frontend: none for POC (Slack + CLI only)
+## 18. Log storage: ClickHouse over Loki
+
+- **Decision**: mock environment logs land in ClickHouse via Vector (docker log source → JSON parse → shape → HTTP JSONEachRow insert). The MCP `query_logs` tool will be a SQL query, not LogQL.
+- **Alternatives**:
+  - (A) Loki + Promtail — textbook Prometheus-ecosystem choice, label-based indexing.
+  - (B) Elasticsearch — full-text inverted index, heavy on storage.
+  - (C) Both Loki and ClickHouse in parallel — max flexibility, max complexity.
+- **Why**: Loki's label-index + chunk-scan model degrades once service count grows past ~100; label cardinality explodes and chunk scans become linear. Personal production experience already saw Loki queries hang at that scale, with the fix being a migration to ClickHouse. ClickHouse is column-store + primary-key + skip-indexes; query p99 stays predictable as service count grows. Bonus: SQL is universal, agent tool logic transfers to any future employer's log pipeline; LogQL is Grafana-ecosystem-only.
+- **Cost**: schema design work up-front (`init.sql` with `LowCardinality`, `PARTITION BY toDate(ts)`, `ORDER BY (service, level, ts)`, TTL); Vector pipeline more configured than Promtail; loses parity with Prometheus's label model, so cross-signal joins (metric → log) need a query, not a Grafana click.
+- **Reconsider when**: service count stays under ~50 and team lacks CH ops experience — Loki's operational simplicity wins at small scale.
+
+**Sub-decisions this drives**:
+- **Timestamp normalization at ingestion, not at source**: services emit ISO 8601 with trailing `Z`; ClickHouse's DateTime64 parser rejects `Z`. Vector's shape transform strips `T` → space and drops `Z`. Reason: don't couple service log format to storage layer's parsing quirks.
+- **`extra String` as JSON catch-all**: business-event fields (`order_id`, `reason`) whitelisted into `extra` as encoded JSON rather than adding columns per field. Reason: schema evolution stays free; can still `JSONExtractString(extra, 'order_id')` for queries.
+
+## 19. Frontend: none for POC (Slack + CLI only)
 
 - **Decision**: incident reports post to Slack via webhook and print to CLI. No web UI.
 - **Alternatives**:
