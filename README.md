@@ -32,6 +32,7 @@ The full rationale, tradeoffs, and interview-mapped depth points are in the docs
 | [RAG.md](./RAG.md) | Runbook retrieval subsystem — Tier 1.5 build + Tier 2 evolution triggers |
 | [INCIDENT_WALKTHROUGH.md](./INCIDENT_WALKTHROUGH.md) | One incident traced end-to-end through every subsystem, with numbers |
 | [INTERVIEW_CHECKLIST.md](./INTERVIEW_CHECKLIST.md) | 10 depth dimensions with per-item checklist for interview prep |
+| [docs/ROADMAP.md](./docs/ROADMAP.md) | 6-week build plan, lesson-by-lesson status, session handoff pointer |
 
 ---
 
