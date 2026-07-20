@@ -12,11 +12,33 @@ scrape_configs:
       - targets: [prometheus:9090]
 
   # Our application services.
-  # Each target's `service` label is stamped here so PromQL can filter on it
-  # without depending on the service exposing it in the metric.
+  # The `service` label is stamped HERE at scrape time (not in the app).
+  # Why: service identity is a topology property; the app should not need to know
+  # what it's called. This also lets us rename services without recompiling code.
+  - job_name: gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: [gateway:8000]
+        labels:
+          service: gateway
+
   - job_name: checkout
     metrics_path: /metrics
     static_configs:
       - targets: [checkout:8000]
         labels:
           service: checkout
+
+  - job_name: payment
+    metrics_path: /metrics
+    static_configs:
+      - targets: [payment:8000]
+        labels:
+          service: payment
+
+  - job_name: inventory
+    metrics_path: /metrics
+    static_configs:
+      - targets: [inventory:8000]
+        labels:
+          service: inventory

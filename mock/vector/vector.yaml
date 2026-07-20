@@ -54,9 +54,22 @@ transforms:
 
       # Preserve a whitelist of business-level extras as JSON blob.
       # Add more fields here as services grow — cheaper than schema migration.
+      # (Design choice: prefer packing new fields into `extra` over adding CH
+      #  columns; the CH schema stays stable and reads use JSONExtractString.)
       extras = {}
-      if exists(.order_id) { extras = set!(extras, ["order_id"], .order_id) }
-      if exists(.reason)   { extras = set!(extras, ["reason"],   .reason) }
+      if exists(.order_id)         { extras = set!(extras, ["order_id"],         .order_id) }
+      if exists(.txn_id)           { extras = set!(extras, ["txn_id"],           .txn_id) }
+      if exists(.hold_id)          { extras = set!(extras, ["hold_id"],          .hold_id) }
+      if exists(.reason)           { extras = set!(extras, ["reason"],           .reason) }
+      if exists(.detail)           { extras = set!(extras, ["detail"],           .detail) }
+      # Client-side downstream call fields — emitted by _shared.observability.call_downstream.
+      # NOTE: `duration_ms` and `method` are already top-level CH columns and
+      # get reused here — presence of `target_service` disambiguates
+      # "this row describes an outbound call" vs "this row describes an inbound request".
+      if exists(.target_service)   { extras = set!(extras, ["target_service"],   .target_service) }
+      if exists(.target_endpoint)  { extras = set!(extras, ["target_endpoint"],  .target_endpoint) }
+      if exists(.outcome)          { extras = set!(extras, ["outcome"],          .outcome) }
+      if exists(.status_code)      { extras = set!(extras, ["status_code"],      .status_code) }
       .extra = encode_json(extras)
 
       # Container metadata from Docker source.

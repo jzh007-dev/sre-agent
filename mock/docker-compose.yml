@@ -1,22 +1,101 @@
 name: sre-agent-mock
 
+# Shared build config for all 4 app services.
+# Anchor `&app-build` centralizes the parameterized Dockerfile invocation;
+# each service just overrides SERVICE via `<<: *app-build` + its own args.
+x-app-build: &app-build
+  context: services
+  dockerfile: Dockerfile
+
+x-app-labels: &app-labels
+  logging: vector           # Vector only tails containers with this label
+
 services:
   # ─── Application services ─────────────────────────────────────────
+  gateway:
+    build:
+      <<: *app-build
+      args:
+        SERVICE: gateway
+    image: sre-agent-mock/gateway:latest
+    container_name: mock-gateway
+    environment:
+      SERVICE_NAME: gateway
+      SERVICE_VERSION: v1.0.0
+      LOG_LEVEL: INFO
+      CHECKOUT_URL: http://checkout:8000
+    ports:
+      - "18080:8000"           # external entry point
+    labels:
+      <<: *app-labels
+      service: gateway
+    depends_on:
+      - checkout
+    networks:
+      - mocknet
+    restart: unless-stopped
+
   checkout:
     build:
-      context: services/checkout
-      dockerfile: Dockerfile
+      <<: *app-build
+      args:
+        SERVICE: checkout
     image: sre-agent-mock/checkout:latest
     container_name: mock-checkout
     environment:
       SERVICE_NAME: checkout
       SERVICE_VERSION: v1.0.0
       LOG_LEVEL: INFO
+      PAYMENT_URL: http://payment:8000
+      INVENTORY_URL: http://inventory:8000
     ports:
       - "18081:8000"
     labels:
-      logging: vector           # ← Vector 只抓带这个 label 的容器
+      <<: *app-labels
       service: checkout
+    depends_on:
+      - payment
+      - inventory
+    networks:
+      - mocknet
+    restart: unless-stopped
+
+  payment:
+    build:
+      <<: *app-build
+      args:
+        SERVICE: payment
+    image: sre-agent-mock/payment:latest
+    container_name: mock-payment
+    environment:
+      SERVICE_NAME: payment
+      SERVICE_VERSION: v1.0.0
+      LOG_LEVEL: INFO
+    ports:
+      - "18082:8000"
+    labels:
+      <<: *app-labels
+      service: payment
+    networks:
+      - mocknet
+    restart: unless-stopped
+
+  inventory:
+    build:
+      <<: *app-build
+      args:
+        SERVICE: inventory
+    image: sre-agent-mock/inventory:latest
+    container_name: mock-inventory
+    environment:
+      SERVICE_NAME: inventory
+      SERVICE_VERSION: v1.0.0
+      LOG_LEVEL: INFO
+    ports:
+      - "18083:8000"
+    labels:
+      <<: *app-labels
+      service: inventory
     networks:
       - mocknet
     restart: unless-stopped
@@ -51,12 +130,11 @@ services:
       CLICKHOUSE_PASSWORD: ""
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
-      # init.sql runs once at first startup, creates database + tables.
       - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - clickhouse_data:/var/lib/clickhouse
     ports:
-      - "18123:8123"   # HTTP interface (Vector + curl use this)
-      - "19000:9000"   # native TCP (clickhouse-client uses this)
+      - "18123:8123"
+      - "19000:9000"
     networks:
       - mocknet
     restart: unless-stopped

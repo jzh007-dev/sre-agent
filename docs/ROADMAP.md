@@ -27,7 +27,7 @@ Goal: a docker-compose local stack that produces realistic metrics + logs + can 
 | L2 | FastAPI ≈ Spring Boot; ContextVar as async-safe MDC; prometheus_client primitives; middleware-owned observability | `mock/services/checkout/{app.py, requirements.txt, Dockerfile}` | `[x]` |
 | L3 | Counter/Gauge/Histogram/Summary internals; label cardinality math; PromQL essentials; RED / USE frameworks | (conceptual — informs future metric design) | `[x]` |
 | L4 | Prometheus scrape config, ClickHouse schema (LowCardinality, partition, sort key, TTL), Vector 3-stage pipeline, log timestamp normalization | `mock/{docker-compose.yml, prometheus/, clickhouse/init.sql, vector/vector.yaml}` | `[x]` |
-| L5 | Multi-service call graph; httpx client; correlation_id propagation via header; route-pattern label to avoid cardinality explosion; client-side downstream metrics | `mock/services/{gateway, payment, inventory}/` + updates to checkout to call downstreams | `[ ]` |
+| L5 | Multi-service call graph; httpx client; correlation_id propagation via header; route-pattern label to avoid cardinality explosion; client-side downstream metrics | `mock/services/{gateway, payment, inventory}/` + updates to checkout to call downstreams | `[x]` |
 | L6 | Fault injection framework: admin endpoint on each service; fault types (error_rate, latency, dependency_fail, pool_exhaust); YAML scenarios; simple load generator | `mock/services/_shared/fault.py`, `mock/scenarios/*.yaml`, `mock/scripts/load.py` | `[ ]` |
 
 **Week 1 exit criteria**: can run 3-5 scenarios via CLI, see metrics spike in Prometheus and error logs in ClickHouse.
@@ -130,10 +130,15 @@ These aren't in a specific week — bit-by-bit each week:
 ## Current pointer
 
 **Session end date**: 2026-07-19  
-**Last completed**: Week 1 L4 (docker-compose + Prometheus + ClickHouse + Vector, tested end-to-end)  
-**Next up**: Week 1 L5 (add gateway/payment/inventory + correlation_id propagation via httpx headers)  
+**Last completed**: Week 1 L5 (4-service call graph gateway→checkout→{payment,inventory}, correlation_id propagation, client + server metrics, ClickHouse traces one correlation_id across all 4 services)  
+**Next up**: Week 1 L6 (fault injection framework — admin endpoint per service, YAML scenarios, load generator)  
 **Blockers**: none  
 **Notes for next session**:
-- Mock env local stack tested and healthy (all 4 containers running)
-- User has completed Q&A checkpoints for L1-L3; L3 revealed weak spots on server-side vs client-side metric distinction and gauge-vs-counter (revisit when writing gateway/payment client-side metrics in L5)
-- Teaching mode reminders: concise responses, Socratic/decision-first, Java analogies, interview framing on every decision
+- All 7 containers healthy; single order via `curl -X POST localhost:18080/orders` produces 10 correlated log rows across all 4 services in ClickHouse
+- Verified live: `rate(downstream_requests_total{target_service="payment"}[1m]) - rate(http_requests_total{service="payment",endpoint="/charge"}[1m])` = 0 on healthy paths. L6 fault injection is the moment this delta becomes non-zero — that's the interview payoff.
+- Design decisions in L5 worth revisiting when L6 hits:
+  - `outcome` label is split into `ok / http_5xx / http_4xx / pool_timeout / connect_timeout / read_timeout / timeout / conn_error / http_error` — pool_timeout will fire under pool_exhaust scenario, distinct from network timeout
+  - single parameterized Dockerfile at `mock/services/Dockerfile` (build arg SERVICE), all 4 services share `_shared/observability.py`
+  - Kong intentionally NOT integrated (JD-driven anxiety noted; discussion in-chat concluded "手写 gateway + 讲解 Kong 概念 > 装用过 Kong"; may add optional Week 6 L1.5 bonus lesson to spin Kong in front and delegate rate-limit)
+- User's L3 weak spots (server vs client metric, gauge vs counter) closed via Q1 Socratic check in this session — verified live-Prometheus formula and the ClickHouse cross-service correlation table. Kept the `rate()` warning + label-ownership (service label is stamped at scrape time in prometheus.yml, not by the app).
+- Teaching mode reminders: concise responses, Socratic/decision-first, Java analogies, interview framing on every decision, do NOT plow through multiple files silently — check in after each major decision block.
