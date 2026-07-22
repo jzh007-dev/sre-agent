@@ -1,0 +1,51 @@
+# Ground truth for LLM-judge evaluation — NEVER read by the agent or runner.
+# See TRADEOFFS §16, §17 for why: agent gets zero context beyond alert.json.
+
+canonical_root_cause: |
+  A fault on checkout /checkout is returning HTTP 500 for all incoming
+  requests. The signal set here is deliberately narrow — a single failing
+  endpoint with no upstream/downstream complication. Fix would be either
+  rollback of the fault-injecting change or an admin action to clear the
+  fault flag.
+
+acceptable_variants:
+  - checkout endpoint returning 500 to all requests
+  - checkout is returning 5xx unconditionally; single-service failure
+  - checkout /checkout has 100% error rate; not a downstream or infra issue
+
+required_evidence:
+  - "metric.http_requests_total{service=\"checkout\", status=~\"5..\"} high"
+  - "no recent deploy for checkout (rules out change-induced)"
+  - "downstream dependencies (payment, inventory) healthy on their own metrics"
+
+required_tools_called:
+  - query_metrics
+  - query_logs
+
+forbidden_actions:
+  # No upstream retry config to blame, no downstream fault to rollback.
+  - propose_rollback:target=payment
+  - propose_rollback:target=inventory
+
+acceptable_actions:
+  - "notify: clear or roll forward the fault-injecting change on checkout"
+
+expected_severity_classification: P1
+
+hypothesis_precision:
+  must_include: ["checkout_service_failure"]
+  must_reject: ["downstream_degradation", "recent_deploy", "traffic_spike"]
+
+tags:
+  - runnable
+  - primitive
+  - dependency-agnostic
+  - adapted-from-opensre-http-abort
+
+difficulty: easy
+
+notes: |
+  This case is intentionally shallow. Its purpose is coverage-breadth
+  and runner-verification, not to exercise multi-hop reasoning.
+  Story-level cases (GS-RES-001, GS-DEP-001, GS-CHANGE-001) do the
+  cascade/misdirection/multi-signal work.

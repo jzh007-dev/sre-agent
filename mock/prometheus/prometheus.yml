@@ -53,6 +53,20 @@ scrape_configs:
         labels:
           service: inventory
 
+  - job_name: auth
+    metrics_path: /metrics
+    static_configs:
+      - targets: [auth:8000]
+        labels:
+          service: auth
+
+  - job_name: deploy-history
+    metrics_path: /metrics
+    static_configs:
+      - targets: [deploy-history:8000]
+        labels:
+          service: deploy-history
+
   # redis_exporter — Redis metrics via the standard community exporter.
   # `service=redis` label matches the exporter's target semantics (a Redis
   # instance) rather than the exporter process itself — so PromQL like

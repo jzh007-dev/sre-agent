@@ -1,0 +1,26 @@
+{
+  "_meta": {
+    "purpose": "Runnable primitive case adapted from OpenSRE's http-abort experiment. Simplest end-to-end runnable case — verifies the case_runner + AlertManager + incident-tracker chain works. Reproduces via a 100% error_rate fault on checkout /checkout for the duration of load."
+  },
+  "title": "[Triggered] checkout 5xx rate above 5%",
+  "alert_source": "alertmanager",
+  "alert_name": "HighErrorRate",
+  "severity": "P1",
+  "message": "5xx rate for checkout has been > 5% for 1 minute.",
+  "text": "checkout /checkout endpoint returning HTTP 500 to all callers.",
+  "commonLabels": {
+    "alertname": "HighErrorRate",
+    "service": "checkout",
+    "severity": "P1",
+    "category": "reliability",
+    "env": "mock",
+    "cluster": "sre-agent-mock"
+  },
+  "commonAnnotations": {
+    "summary": "checkout 5xx rate above 5%",
+    "description": "5xx rate for checkout has been > 5% for 1 minute.",
+    "query": "sum by (service) (rate(http_requests_total{service=\"checkout\",status=~\"5..\"}[1m]))",
+    "runbook_url": "https://wiki/runbooks/checkout-5xx",
+    "correlation_id": "gs-p-http-abort-001"
+  }
+}

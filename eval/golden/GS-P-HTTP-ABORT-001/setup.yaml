@@ -1,0 +1,38 @@
+description: |
+  Primitive: dependency-issued HTTP errors — checkout /checkout returns 500
+  for every request via error_rate fault. Adapted from OpenSRE's http-abort
+  chaos experiment.
+
+  This is the simplest end-to-end runnable case, kept small on purpose:
+  used to verify the case_runner path (setup → load → alert → incident)
+  before layering in story-level cases.
+
+# Total wall-clock this case runs (load + alert-fire window). alert rule
+# HighErrorRate has `for: 1m` so 120s gives comfortable slack for it to fire.
+duration_seconds: 120
+
+# No infra faults — this case is pure app-layer.
+infra_commands: []
+
+# No deploy history — this case rules out change-induced by omission.
+deploy_records: []
+
+# Business-service fault: return 500 from checkout /checkout for every
+# request (rate=1.0). Real gateway forwards the 500 → gateway itself
+# also enters HighErrorRate state (cascade signal).
+app_faults:
+  - service: checkout
+    spec:
+      name: gs-p-http-abort-001
+      type: error_rate
+      target_endpoint: /checkout
+      config:
+        rate: 1.0
+        status_code: 500
+
+# Drive load through the gateway edge so we exercise the full
+# gateway → checkout hop and both server + client-side metrics record it.
+load:
+  - method: POST
+    url: http://localhost:18080/orders
+    rate_per_sec: 3

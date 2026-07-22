@@ -150,6 +150,59 @@ services:
       - mocknet
     restart: unless-stopped
 
+  # Auth service — user login + session verification, backed by real Redis.
+  # Carries the user-visible SLO surface for change-induced (token algo)
+  # and resource-induced (cache OOM) incident stories.
+  auth:
+    build:
+      <<: *app-build
+      args:
+        SERVICE: auth
+    image: sre-agent-mock/auth:latest
+    container_name: mock-auth
+    environment:
+      SERVICE_NAME: auth
+      SERVICE_VERSION: v1.0.0
+      LOG_LEVEL: INFO
+      REDIS_URL: redis://redis:6379
+      TOKEN_VERSION: v1  # bumped to v2 in the token-upgrade case setup
+    ports:
+      - "18086:8000"
+    labels:
+      <<: *app-labels
+      service: auth
+    depends_on:
+      - redis
+    networks:
+      - mocknet
+    restart: unless-stopped
+
+  # Deploy history — mock of ArgoCD/Spinnaker/GitHub Actions deploy audit.
+  # Case setup.yaml files POST deploy records here before starting a run so
+  # the agent's future deploy-mcp tool can query `list_recent_deploys(service, window)`.
+  deploy-history:
+    build:
+      <<: *app-build
+      args:
+        SERVICE: deploy_history
+    image: sre-agent-mock/deploy-history:latest
+    container_name: mock-deploy-history
+    environment:
+      SERVICE_NAME: deploy-history
+      SERVICE_VERSION: v1.0.0
+      LOG_LEVEL: INFO
+      DEPLOY_STORE_PATH: /data/deploys.json
+    ports:
+      - "18087:8000"
+    labels:
+      <<: *app-labels
+      service: deploy-history
+    volumes:
+      - deploy_history_data:/data
+    networks:
+      - mocknet
+    restart: unless-stopped
+
   # PagerDuty-shaped mock. Receives the AlertManager webhook, exposes a REST
   # incident state machine (triggered → acked → resolved). Closes the loop
   # from "alert fired" to "incident to act on" — the surface the agent's
@@ -252,3 +305,4 @@ networks:
 
 volumes:
   clickhouse_data:
+  deploy_history_data:
