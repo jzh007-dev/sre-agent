@@ -100,7 +100,7 @@ services:
       - mocknet
     restart: unless-stopped
 
-  # ─── Metrics: Prometheus ─────────────────────────────────────────
+  # ─── Metrics: Prometheus + AlertManager ──────────────────────────
   prometheus:
     image: prom/prometheus:v2.53.0
     container_name: mock-prometheus
@@ -110,8 +110,29 @@ services:
       - --web.enable-lifecycle
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
     ports:
       - "19090:9090"
+    depends_on:
+      - alertmanager
+    networks:
+      - mocknet
+    restart: unless-stopped
+
+  # Real AlertManager (not a mock) — chosen because the config format IS the
+  # industry standard. Alert rules in prometheus/alerts.yml route through here
+  # to a null receiver (visible in UI at :19093); Commit B/C will replace the
+  # receiver with a webhook pointing to the mock incident tracker.
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: mock-alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "19093:9093"
     networks:
       - mocknet
     restart: unless-stopped

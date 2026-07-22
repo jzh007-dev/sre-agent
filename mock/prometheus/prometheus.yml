@@ -5,6 +5,16 @@ global:
     env: mock
     cluster: sre-agent-mock
 
+# Load recording + alerting rules.
+rule_files:
+  - alerts.yml
+
+# Where to send fired alerts.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: [alertmanager:9093]
+
 scrape_configs:
   # Prometheus scrapes itself (health of the scraper).
   - job_name: prometheus

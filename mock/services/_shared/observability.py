@@ -127,9 +127,16 @@ def install_observability(app: FastAPI) -> None:
 
     @app.middleware("http")
     async def _observe(request: Request, call_next):
-        # Skip /metrics itself — self-scrape noise, and its endpoint label
-        # would dilute the histogram.
-        if request.url.path == "/metrics":
+        # Skip control-plane paths:
+        # - /metrics: Prometheus self-scrapes ~17k/day, would dominate counters
+        #   and dilute the latency histogram (scrapes are <1ms).
+        # - /admin/*: fault-injection control plane, not user traffic.
+        # - /health: liveness probes, ditto.
+        path = request.url.path
+        if (path == "/metrics"
+                or path == "/health"
+                or path == "/admin"
+                or path.startswith("/admin/")):
             return await call_next(request)
 
         # Correlation: accept caller header, else mint one.

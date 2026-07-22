@@ -1,0 +1,76 @@
+# Alert rules — evaluated by Prometheus, forwarded to AlertManager.
+#
+# Each rule is deliberately shaped like a real SRE runbook trigger:
+# - `for:` clause: alert only after sustained breach (avoids single-scrape flaps)
+# - `severity` label: consumed by AlertManager routing tree
+# - `service` label: comes from the scrape config (topology-side), not the app
+# - `runbook_url`: canonical annotation SRE agent will follow into the RAG layer
+#
+# We EXCLUDE control-plane paths (/health, /metrics, /admin) from SLO math so
+# scrape traffic and admin ops don't dilute error/latency signals.
+
+groups:
+  - name: service_slos
+    interval: 10s
+    rules:
+      # 5xx rate on user-facing endpoints — high-signal, primary alert type.
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum by (service) (
+              rate(http_requests_total{status=~"5..", endpoint!~"/health|/metrics|/admin.*"}[1m])
+            )
+            /
+            sum by (service) (
+              rate(http_requests_total{endpoint!~"/health|/metrics|/admin.*"}[1m])
+            )
+          ) > 0.05
+        for: 1m
+        labels:
+          severity: P1
+          category: reliability
+        annotations:
+          summary: "{{ $labels.service }} 5xx rate above 5%"
+          description: "5xx rate for {{ $labels.service }} has been > 5% for 1 minute."
+          runbook_url: "https://wiki/runbooks/{{ $labels.service }}-5xx"
+          query: 'sum by (service) (rate(http_requests_total{service="{{ $labels.service }}",status=~"5.."}[1m]))'
+
+      # p99 latency — for latency-injection faults.
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum by (service, le) (
+              rate(http_request_duration_seconds_bucket{endpoint!~"/health|/metrics|/admin.*"}[1m])
+            )
+          ) > 1
+        for: 1m
+        labels:
+          severity: P1
+          category: reliability
+        annotations:
+          summary: "{{ $labels.service }} p99 latency above 1s"
+          description: "p99 latency for {{ $labels.service }} has been > 1s for 1 minute."
+          runbook_url: "https://wiki/runbooks/{{ $labels.service }}-latency"
+
+      # Downstream failure rate — how one service sees its dependencies.
+      # High signal for dependency-induced incidents: the black-hole formula
+      # `client rate - server rate` shows up here as elevated outcome!=ok.
+      - alert: DownstreamFailureRateHigh
+        expr: |
+          (
+            sum by (service, target_service) (
+              rate(downstream_requests_total{outcome!="ok"}[1m])
+            )
+            /
+            sum by (service, target_service) (
+              rate(downstream_requests_total[1m])
+            )
+          ) > 0.05
+        for: 1m
+        labels:
+          severity: P2
+          category: reliability
+        annotations:
+          summary: "{{ $labels.service }} → {{ $labels.target_service }} failure rate above 5%"
+          description: "Downstream calls from {{ $labels.service }} to {{ $labels.target_service }} failing at >5%."
+          runbook_url: "https://wiki/runbooks/downstream-degradation"

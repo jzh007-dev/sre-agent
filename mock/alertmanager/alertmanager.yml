@@ -1,0 +1,22 @@
+# AlertManager config for the mock environment.
+#
+# Design notes:
+# - `null-receiver` swallows alerts silently — the UI at :9093 still shows them
+#   (that IS the point in Commit A: prove alerts fire end-to-end from real
+#   Prometheus rules against real metrics).
+# - Commit B/C will replace this with a webhook receiver that POSTs into a
+#   mock incident tracker (PagerDuty-shaped API), which the agent will
+#   eventually consume via its ingress.
+# - group_wait / group_interval are aggressive because we want fast feedback
+#   in mock. Prod defaults are ~30s / 5m.
+
+route:
+  receiver: null-receiver
+  group_by: [alertname, service]
+  group_wait: 5s
+  group_interval: 10s
+  repeat_interval: 1m
+
+receivers:
+  - name: null-receiver
+    # No webhook_configs yet — alerts are visible in the AlertManager UI.

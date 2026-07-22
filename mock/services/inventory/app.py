@@ -12,6 +12,7 @@ import uuid
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from _shared.fault import install_faults
 from _shared.observability import get_logger, install_observability
 
 SERVICE_TITLE = "inventory"
@@ -21,6 +22,7 @@ BASELINE_LATENCY_MAX_MS = 80
 BASELINE_ERROR_RATE = 0.01
 
 app = FastAPI(title=SERVICE_TITLE)
+install_faults(app)
 install_observability(app)
 logger = get_logger()
 

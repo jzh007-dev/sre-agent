@@ -13,6 +13,7 @@ import uuid
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from _shared.fault import install_faults
 from _shared.observability import get_logger, install_observability
 
 SERVICE_TITLE = "payment"
@@ -22,6 +23,7 @@ BASELINE_LATENCY_MAX_MS = 200
 BASELINE_ERROR_RATE = 0.03  # 3% — slightly higher than checkout so faults are visible
 
 app = FastAPI(title=SERVICE_TITLE)
+install_faults(app)
 install_observability(app)
 logger = get_logger()
 

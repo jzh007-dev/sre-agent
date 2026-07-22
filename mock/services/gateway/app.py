@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from _shared.fault import install_faults
 from _shared.observability import (
     call_downstream,
     get_logger,
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=SERVICE_TITLE, lifespan=lifespan)
+install_faults(app)
 install_observability(app)
 logger = get_logger()
 

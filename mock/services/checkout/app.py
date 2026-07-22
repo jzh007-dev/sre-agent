@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from _shared.fault import install_faults
 from _shared.observability import (
     call_downstream,
     get_logger,
@@ -48,6 +49,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=SERVICE_TITLE, lifespan=lifespan)
+# Order matters: install_faults BEFORE install_observability so the observe
+# middleware wraps the fault middleware — fault short-circuits still get
+# counted in http_requests_total. See _shared/fault.py docstring.
+install_faults(app)
 install_observability(app)
 logger = get_logger()
 
