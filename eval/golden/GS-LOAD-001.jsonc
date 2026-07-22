@@ -1,4 +1,4 @@
-// GS-QPS-SPIKE-001 — traffic-driven cascade with retry storm amplification
+// GS-LOAD-001 — traffic-driven cascade with retry storm amplification
 // Difficulty: hard (multi-signal, misleading dominant signal, retry-storm root cause not the traffic itself)
 //
 // Story: A viral marketing push at 20:00 UTC sends 10x normal traffic to
@@ -7,7 +7,7 @@
 // amplified 10x → 30x actual load, saturating DB pool". The fix is not
 // "scale up" but "kill the retry storm at the upstream".
 {
-  "case_id": "GS-QPS-SPIKE-001",
+  "case_id": "GS-LOAD-001",
   "title": "checkout-svc cascade from viral traffic + upstream retry storm",
   "difficulty": "hard",
   "tags": ["traffic-driven", "retry-storm", "cascade", "db-pool", "misleading-signal"],

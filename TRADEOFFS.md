@@ -244,6 +244,30 @@ Format for each entry:
 - **Cost**: less impressive demo video; harder for a non-technical viewer to "see" the agent.
 - **Reconsider when**: shipping to non-engineering users, or when trace replay UX becomes a differentiator.
 
+## 16. Middleware-specific knowledge lives in RAG, not in agent code or cases
+
+- **Decision**: Three strict layers of specificity:
+  - **Agent code** — 100% middleware-agnostic. Tools are `query_metrics`, `query_logs`, `get_service_topology`, `list_recent_deploys`. No Redis-specific / Postgres-specific / Kafka-specific branches anywhere in the graph.
+  - **Golden cases** — named by **diagnostic pattern**, not by middleware. Six categories: `LOAD`, `CHANGE`, `DEP`, `RES`, `DATA`, `ENV`. A specific incident (e.g., Redis bgsave OOM) is an *instance* of the `RES` pattern, not its own category.
+  - **Runbooks (RAG)** — the only place middleware-specific knowledge lives. "How to triage a Redis OOM", "Kafka consumer lag playbook", "Postgres slow query checklist" — each a document, retrieved on demand at investigation time.
+- **Alternatives**:
+  - (A) Middleware-specific tools per vendor (e.g. `redis_check_memory`, `kafka_check_lag`). This is HolmesGPT's `toolsets/` shape.
+  - (B) Middleware-specific cases (e.g. `GS-REDIS-*`, `GS-POSTGRES-*`).
+  - (C) Hard-code middleware handling in the agent's prompt library.
+- **Why**: A new middleware in production must not require a new case category, a new tool, or a code change. Adding Kafka to the fleet is "index the Kafka runbook + add exporter to Prometheus" — nothing else. This is how any team with a heterogeneous stack can adopt the agent without a per-vendor migration project. It's also why the incident taxonomy (six patterns) is stable: production incidents *are* one of these six shapes regardless of which technology is failing.
+- **Cost**: Loses the immediate legibility of tech-specific case names ("Redis OOM" → "resource exhaustion in a downstream dep"). Users have to learn the six patterns. Also puts more pressure on RAG quality — bad runbooks mean the agent won't know how to interrogate a specific technology.
+- **Reconsider when**: The agent needs to *take actions* on a middleware (not just diagnose) — writing to a Redis cache, restarting a Kafka broker, etc. Actions may warrant vendor-specific tools with proper auth/idempotency semantics.
+
+## 17. Alert on SLO violations only; infra signals are query targets, not pages
+
+- **Decision**: Alerting rules fire on **user-facing SLO breaches** (5xx rate, latency, downstream failure rate). Infra metrics (`redis_memory_used_bytes`, `pg_stat_activity_count`, `jvm_gc_pause_seconds`) are scraped, exposed in dashboards, and available for the agent to query — but do **not** page on-call.
+- **Alternatives**:
+  - (A) Layered alerting: both infra and business layers page, routed to different teams. "Redis Memory Pressure" (platform) + "Auth Login Failure" (auth team) both fire on the same underlying incident.
+  - (B) Infra-only alerts (unusual, but seen in ops-heavy orgs).
+- **Why**: At 100+ services with 30% using Redis (a normal mature-org shape), infra-layer alerts cause a page storm on every incident — Redis blips → 30 infra alerts fire → on-call is overwhelmed → real alerts get missed. Google SRE Book Chapter 6 recommends SLO-only alerting for the same reason. The infra signals still matter, but they are the *evidence the agent gathers during RCA*, not the trigger for human wake-up. Alert count should reflect "events requiring immediate human action", not "monitoring points instrumented".
+- **Cost**: Loses the leading-indicator benefit of infra alerts (memory pressure warning *before* users see errors). Compensation: dashboards + prediction models in the observability layer can page pre-emptively when the risk model triggers — but that's a different decision point (risk-based paging) rather than metric-threshold paging.
+- **Reconsider when**: The organization has separate platform vs product on-call rotations *and* platform owns latency SLOs for the middleware layer independently of business services. In that setup, layered alerts route to the right team without contributing to a single-team page storm.
+
 ---
 
 ## Meta-decisions

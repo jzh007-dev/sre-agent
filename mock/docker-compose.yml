@@ -100,26 +100,52 @@ services:
       - mocknet
     restart: unless-stopped
 
-  # Redis-shaped mock. Real Redis uses bgsave forks that can OOM under
-  # memory pressure — we simulate the signal shape (gauge climb → 5xx +
-  # canonical OOM log line) without running actual Redis. Interview point:
-  # the mock is a *signal generator*, not a functional Redis.
-  session-cache:
-    build:
-      <<: *app-build
-      args:
-        SERVICE: session_cache
-    image: sre-agent-mock/session-cache:latest
-    container_name: mock-session-cache
-    environment:
-      SERVICE_NAME: session-cache
-      SERVICE_VERSION: v1.0.0
-      LOG_LEVEL: INFO
+  # Real Redis — the same off-the-shelf image production runs. Not a mock.
+  # Fault injection happens through Redis's own admin surface: setup scripts
+  # call `redis-cli CONFIG SET maxmemory`, `DEBUG POPULATE`, etc. This means
+  # metric names, log signatures, and failure modes are the real thing —
+  # `redis_memory_used_bytes` (via exporter) is exactly what a prod SRE
+  # would query.
+  #
+  # Redis stands in as the representative infra dependency in the mock env.
+  # Adding a second (Kafka / Postgres / Mongo) is 0 lines of agent code — the
+  # agent's diagnostic tools are middleware-agnostic; specific-middleware
+  # knowledge lives in the runbook RAG layer (see TRADEOFFS.md §16).
+  redis:
+    image: redis:7-alpine
+    container_name: mock-redis
+    command:
+      - redis-server
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+      # Enable DEBUG POPULATE so case setup.yaml scripts can fill memory
+      # without needing a real client loop. In prod this stays disabled.
+      - --enable-debug-command
+      - "yes"
     ports:
-      - "18084:8000"
+      - "16379:6379"
     labels:
       <<: *app-labels
-      service: session-cache
+      service: redis
+    networks:
+      - mocknet
+    restart: unless-stopped
+
+  # redis_exporter — community-standard Prometheus exporter for Redis.
+  # Runs as a sidecar service, scrapes Redis over the network, and exposes
+  # `redis_memory_used_bytes`, `redis_connected_clients`, `redis_up`, etc.
+  # This is the same exporter used at Netflix, Coinbase, Grafana Labs et al.
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0-alpine
+    container_name: mock-redis-exporter
+    command:
+      - --redis.addr=redis://redis:6379
+    ports:
+      - "19121:9121"
+    depends_on:
+      - redis
     networks:
       - mocknet
     restart: unless-stopped

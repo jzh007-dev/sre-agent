@@ -53,12 +53,16 @@ scrape_configs:
         labels:
           service: inventory
 
-  - job_name: session-cache
+  # redis_exporter — Redis metrics via the standard community exporter.
+  # `service=redis` label matches the exporter's target semantics (a Redis
+  # instance) rather than the exporter process itself — so PromQL like
+  # `redis_memory_used_bytes{service="redis"}` reads naturally.
+  - job_name: redis
     metrics_path: /metrics
     static_configs:
-      - targets: [session-cache:8000]
+      - targets: [redis-exporter:9121]
         labels:
-          service: session-cache
+          service: redis
 
   - job_name: incident-tracker
     metrics_path: /metrics

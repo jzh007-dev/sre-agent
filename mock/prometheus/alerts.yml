@@ -75,20 +75,10 @@ groups:
           description: "Downstream calls from {{ $labels.service }} to {{ $labels.target_service }} failing at >5%."
           runbook_url: "https://wiki/runbooks/downstream-degradation"
 
-  - name: resource_slos
-    interval: 10s
-    rules:
-      # Session-cache memory pressure — the bgsave OOM story precondition.
-      # Threshold is set below the memory_pressure fault's default
-      # failure threshold (400 MB) so this alert fires BEFORE requests
-      # start failing — the classic "leading indicator" SRE pattern.
-      - alert: SessionCacheMemoryPressure
-        expr: session_cache_memory_bytes > 350000000
-        for: 30s
-        labels:
-          severity: P2
-          category: resource
-        annotations:
-          summary: "session-cache memory > 350 MB (bgsave OOM risk)"
-          description: "session_cache_memory_bytes has been > 350 MB for 30s; approaching bgsave failure threshold."
-          runbook_url: "https://wiki/runbooks/session-cache-memory-pressure"
+# Note on layering: at 100+ service scale, teams generally page on SLO
+# violations (user-visible impact) rather than infra metrics. Infra signals
+# (redis memory, DB pool, GC pause) are surfaced through dashboards + queried
+# during agent RCA — not paged. See TRADEOFFS.md §17 for the reasoning.
+#
+# Cases needing infra-metric-driven alerts (rare) can attach case-scoped
+# rules via their setup.yaml.

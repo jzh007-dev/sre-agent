@@ -28,9 +28,10 @@ Goal: a docker-compose local stack that produces realistic metrics + logs + can 
 | L3 | Counter/Gauge/Histogram/Summary internals; label cardinality math; PromQL essentials; RED / USE frameworks | (conceptual — informs future metric design) | `[x]` |
 | L4 | Prometheus scrape config, ClickHouse schema (LowCardinality, partition, sort key, TTL), Vector 3-stage pipeline, log timestamp normalization | `mock/{docker-compose.yml, prometheus/, clickhouse/init.sql, vector/vector.yaml}` | `[x]` |
 | L5 | Multi-service call graph; httpx client; correlation_id propagation via header; route-pattern label to avoid cardinality explosion; client-side downstream metrics | `mock/services/{gateway, payment, inventory}/` + updates to checkout to call downstreams | `[x]` |
-| L6 | Fault injection framework: admin endpoint on each service; fault types (error_rate, latency, dependency_fail, pool_exhaust); YAML scenarios; simple load generator | `mock/services/_shared/fault.py`, `mock/scenarios/*.yaml`, `mock/scripts/load.py` | `[ ]` |
+| L6 | Alerting layer + fault injection: real `AlertManager` with SLO-based rules; per-service `/admin/faults` (types: `error_rate`, `latency_ms`, `log_pattern_emit`, `dependency_fail`); PD-shaped `incident-tracker` closing the webhook loop; real Redis + `redis_exporter` (infra deps are real components, not Python mocks). Recalibration mid-lesson dropped a Python session-cache mock and infra-layer paging in favor of the production-standard shape. | `mock/alertmanager/`, `mock/prometheus/alerts.yml`, `mock/services/_shared/fault.py`, `mock/services/incident_tracker/`, real `redis` + `redis-exporter` in compose | `[~]` |
+| L7 | Golden case structure + case runner: 3-file case layout (`alert.json` shaped like an AlertManager webhook + `setup.yaml` for reproducible fault application + `expected.yaml` for LLM-judge eval), auth-svc for user-facing SLO surface, deploy-history mock for change-induced cases, 3 story cases from real production incidents (patterned across `RES / DEP / CHANGE+DATA`) + ~5 primitive cases adapted from OpenSRE chaos experiments | `eval/golden/GS-*/`, `mock/services/auth/`, `mock/services/deploy_history/`, `mock/scripts/case_runner.py` | `[ ]` |
 
-**Week 1 exit criteria**: can run 3-5 scenarios via CLI, see metrics spike in Prometheus and error logs in ClickHouse.
+**Week 1 exit criteria**: `python mock/scripts/case_runner.py <case-id>` applies the case's `setup.yaml` (faults + Redis config + deploy fixture), waits for the expected AlertManager alert to fire, and dumps the tracked incident from `incident-tracker` — all end-to-end against real Prometheus + real AlertManager + real Redis. 3+ story cases + 5+ primitive cases pass; each case documents its expected root cause for the future Week 2+ agent eval.
 
 ---
 
@@ -129,16 +130,22 @@ These aren't in a specific week — bit-by-bit each week:
 
 ## Current pointer
 
-**Session end date**: 2026-07-19  
-**Last completed**: Week 1 L5 (4-service call graph gateway→checkout→{payment,inventory}, correlation_id propagation, client + server metrics, ClickHouse traces one correlation_id across all 4 services)  
-**Next up**: Week 1 L6 (fault injection framework — admin endpoint per service, YAML scenarios, load generator)  
+**Session end date**: 2026-07-22  
+**Last completed**: L6 Commit A (AlertManager + fault framework), Commit B (session-cache mock + incident-tracker + alert-loop closed), then **architectural recalibration**:
+  - Python session-cache mock **replaced by real `redis:7-alpine` + `oliver006/redis_exporter`** — infra deps are real components, not synthesized
+  - `memory_pressure` fault type + `SessionCacheMemoryPressure` alert **removed** — infra metrics are scraped for query/dashboard, not paged (see [TRADEOFFS.md §17](../TRADEOFFS.md))
+  - Case naming shifted from tech-specific → **6 diagnostic patterns**: `LOAD / CHANGE / DEP / RES / DATA / ENV`. `GS-QPS-SPIKE-001` renamed to `GS-LOAD-001`. Middleware-specific knowledge lives in RAG runbooks, not in cases or agent code (see [TRADEOFFS.md §16](../TRADEOFFS.md))
+
+**Next up**: L6 Commit C — auth-svc + deploy-history mock + 3-file case structure (`alert.json + setup.yaml + expected.yaml` per HolmesGPT+OpenSRE hybrid) + 3 story cases (patterned after user's real production experience) + ~5 primitive cases adapted from OpenSRE chaos experiments + case runner script  
 **Blockers**: none  
-**Notes for next session**:
-- All 7 containers healthy; single order via `curl -X POST localhost:18080/orders` produces 10 correlated log rows across all 4 services in ClickHouse
-- Verified live: `rate(downstream_requests_total{target_service="payment"}[1m]) - rate(http_requests_total{service="payment",endpoint="/charge"}[1m])` = 0 on healthy paths. L6 fault injection is the moment this delta becomes non-zero — that's the interview payoff.
-- Design decisions in L5 worth revisiting when L6 hits:
-  - `outcome` label is split into `ok / http_5xx / http_4xx / pool_timeout / connect_timeout / read_timeout / timeout / conn_error / http_error` — pool_timeout will fire under pool_exhaust scenario, distinct from network timeout
-  - single parameterized Dockerfile at `mock/services/Dockerfile` (build arg SERVICE), all 4 services share `_shared/observability.py`
-  - Kong intentionally NOT integrated (JD-driven anxiety noted; discussion in-chat concluded "手写 gateway + 讲解 Kong 概念 > 装用过 Kong"; may add optional Week 6 L1.5 bonus lesson to spin Kong in front and delegate rate-limit)
-- User's L3 weak spots (server vs client metric, gauge vs counter) closed via Q1 Socratic check in this session — verified live-Prometheus formula and the ClickHouse cross-service correlation table. Kept the `rate()` warning + label-ownership (service label is stamped at scrape time in prometheus.yml, not by the app).
-- Teaching mode reminders: concise responses, Socratic/decision-first, Java analogies, interview framing on every decision, do NOT plow through multiple files silently — check in after each major decision block.
+
+**Positioning reminder for next sessions** (this is a portfolio project for a mature-company SRE role, not a teaching project):
+- Default reference frame: "how would Netflix / Airbnb / Coinbase SRE do this"; scope compromises are labelled as scope trade-offs, not teaching simplifications
+- Real off-the-shelf components (Redis, AlertManager, Prometheus, ClickHouse, Vector) always preferred over Python mocks; mocks reserved for cases where the real thing has irreducible ops burden (e.g. PagerDuty needs an account → `incident-tracker` mock stays)
+- Three-layer architecture: agent code middleware-agnostic; cases pattern-based; middleware specifics in RAG. New middleware in prod = new runbook chunk, 0 code changes, 0 new case categories
+- Alert design: only user-facing SLO violations page; infra signals stay in dashboards + query surface
+
+**Verified live before end of session**:
+- 10 containers healthy (gateway/checkout/payment/inventory + redis + redis-exporter + incident-tracker + prom/alertmanager + CH/vector)
+- End-to-end alert flow: `POST /admin/faults` on checkout with `error_rate=0.5` → `HighErrorRate` fires on both checkout and gateway (cascade) → AlertManager routes to `incident-tracker` webhook → `GET /incidents` returns two tracked incidents with full labels + PD-shaped state machine
+- Correlation id propagates across 4 services; ClickHouse `sre.logs` table stores rows with `correlation_id` for cross-service replay

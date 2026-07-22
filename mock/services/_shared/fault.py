@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import asyncio
 import random
-import time
 from typing import Any
 
 import httpx
@@ -50,22 +49,28 @@ _faults: dict[str, dict[str, Any]] = {}
 # Paths where fault injection MUST be skipped. See design notes above.
 _EXCLUDED_PREFIXES = ("/metrics", "/health", "/admin")
 
-# Fault types this framework knows how to apply.
+# Fault types this framework applies to *our own* application services
+# (checkout, payment, inventory, gateway, auth, ...).
 #
-# Two families of fault types:
+# Faults on infra dependencies (Redis, Postgres, Kafka, ...) are NOT injected
+# through this framework — those use the middleware's own admin surface
+# (redis-cli CONFIG SET, psql, kafka-configs.sh, ...). Rationale: match the
+# real production shape where infra faults produce real vendor-authored
+# signals (real metric names, real log lines) rather than our synthesized
+# approximations. See TRADEOFFS.md §16.
+#
+# Two families of fault types on app services:
 # - MIDDLEWARE-ACTIVE (checked in fault middleware, may short-circuit):
 #     latency_ms         — sleep before endpoint
 #     error_rate         — return 5xx short-circuit
 #     log_pattern_emit   — emit a log line, request proceeds
 #
 # - SERVICE-CONSUMED (services read state, apply per their own semantics):
-#     memory_pressure    — session-cache reads via get_memory_pressure_state()
 #     dependency_fail    — observability.call_downstream reads via check_downstream_fault()
 _KNOWN_TYPES = {
     "latency_ms",
     "error_rate",
     "log_pattern_emit",
-    "memory_pressure",
     "dependency_fail",
 }
 
@@ -116,7 +121,7 @@ async def _apply_one(fault: dict[str, Any], endpoint: str) -> JSONResponse | Non
             },
         )
         return None
-    # memory_pressure / dependency_fail are service-consumed — no middleware action.
+    # dependency_fail is service-consumed — no middleware action.
     return None
 
 
@@ -135,48 +140,10 @@ async def maybe_inject_fault(endpoint: str) -> JSONResponse | None:
 
 # ── Service-consumed fault APIs (called from service code, not middleware) ─
 #
-# memory_pressure and dependency_fail don't fit "inject at HTTP boundary"
-# semantics — they represent *state* the service must consult and translate
-# into its own failure mode (cache SET failing, downstream call raising
-# ConnectError, etc.). Services call these helpers rather than the middleware.
-
-
-def get_memory_pressure_state() -> dict[str, Any] | None:
-    """Called by services with a memory-shaped failure mode (e.g. session-cache).
-
-    Returns a dict describing current simulated memory state, or None when
-    no memory_pressure fault is configured.
-
-    The memory value linearly ramps from `baseline_bytes` to `target_bytes`
-    over `ramp_seconds` after the fault is set. Once `current_bytes` exceeds
-    `threshold_bytes`, `should_fail=True` — the service should reject writes
-    with `failure_message` in the log (defaults to Redis's canonical
-    bgsave OOM signature).
-    """
-    for fault in list(_faults.values()):
-        if fault["type"] != "memory_pressure":
-            continue
-        config = fault["config"]
-        # Stash ramp-start on the fault dict itself. Module-level state,
-        # cleared when the fault is deleted — good enough for a single-process mock.
-        if "_started_at" not in fault:
-            fault["_started_at"] = time.time()
-        elapsed = time.time() - fault["_started_at"]
-        ramp_seconds = max(config.get("ramp_seconds", 30), 1)
-        baseline = config.get("baseline_bytes", 100_000_000)
-        target = config.get("target_bytes", 500_000_000)
-        threshold = config.get("threshold_bytes", 400_000_000)
-        ratio = min(1.0, elapsed / ramp_seconds)
-        current = int(baseline + ratio * (target - baseline))
-        return {
-            "current_bytes": current,
-            "should_fail": current >= threshold,
-            "failure_message": config.get(
-                "failure_message",
-                "bgsave failed: fork failed: Cannot allocate memory",
-            ),
-        }
-    return None
+# dependency_fail doesn't fit "inject at HTTP boundary" semantics — it
+# represents *state* the service must consult and translate into its own
+# failure mode (call raising ConnectError). Services call these helpers
+# rather than the middleware.
 
 
 def check_downstream_fault(target_service: str) -> Exception | None:
