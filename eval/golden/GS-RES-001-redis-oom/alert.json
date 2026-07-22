@@ -1,0 +1,26 @@
+{
+  "_meta": {
+    "purpose": "Story case: Redis OOM cascade causing auth login failures. Reproduces a real production incident (author's own experience — Redis bgsave failed under memory pressure, session writes rejected, users couldn't log in). Not a bgsave-specific fault — it's the general RES pattern where a downstream infra dep runs out of memory. Adding a Postgres out-of-connections case would be same pattern, different instance."
+  },
+  "title": "[Triggered] auth 5xx rate above 5%",
+  "alert_source": "alertmanager",
+  "alert_name": "HighErrorRate",
+  "severity": "P1",
+  "message": "5xx rate for auth has been > 5% for 1 minute.",
+  "text": "auth service /login is returning HTTP 500. Users cannot sign in.",
+  "commonLabels": {
+    "alertname": "HighErrorRate",
+    "service": "auth",
+    "severity": "P1",
+    "category": "reliability",
+    "env": "mock",
+    "cluster": "sre-agent-mock"
+  },
+  "commonAnnotations": {
+    "summary": "auth 5xx rate above 5%",
+    "description": "5xx rate for auth has been > 5% for 1 minute.",
+    "query": "sum by (service) (rate(http_requests_total{service=\"auth\",status=~\"5..\"}[1m]))",
+    "runbook_url": "https://wiki/runbooks/auth-5xx",
+    "correlation_id": "gs-res-001-redis-oom"
+  }
+}

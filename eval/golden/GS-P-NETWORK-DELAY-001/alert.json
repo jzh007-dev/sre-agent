@@ -1,0 +1,24 @@
+{
+  "_meta": {
+    "purpose": "Runnable primitive adapted from OpenSRE's network-delay experiment. Injects 800ms latency on payment /charge — exceeds normal p99, trips HighLatency alert."
+  },
+  "title": "[Triggered] payment p99 latency above 1s",
+  "alert_source": "alertmanager",
+  "alert_name": "HighLatency",
+  "severity": "P1",
+  "message": "p99 latency for payment has been > 1s for 1 minute.",
+  "commonLabels": {
+    "alertname": "HighLatency",
+    "service": "payment",
+    "severity": "P1",
+    "category": "reliability",
+    "env": "mock",
+    "cluster": "sre-agent-mock"
+  },
+  "commonAnnotations": {
+    "summary": "payment p99 latency above 1s",
+    "description": "p99 latency for payment has been > 1s for 1 minute.",
+    "runbook_url": "https://wiki/runbooks/payment-latency",
+    "correlation_id": "gs-p-network-delay-001"
+  }
+}

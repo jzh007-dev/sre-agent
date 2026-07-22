@@ -1,0 +1,42 @@
+canonical_root_cause: |
+  Checkout's outbound calls to payment are failing at the network layer —
+  every call raises a connection error. Payment itself is not receiving
+  the requests (server-side metrics on payment show no traffic). This is
+  a reachability failure (network partition, DNS, service-mesh routing,
+  or payment pod evicted), NOT a payment-service bug.
+
+acceptable_variants:
+  - checkout can't reach payment — connection errors, not payment 5xx
+  - downstream network/reachability failure between checkout and payment
+  - payment is not answering; checkout timing out at connect stage
+
+required_evidence:
+  # THE key evidence: client-side rate elevated, server-side rate ~0
+  - "metric.downstream_requests_total{service=\"checkout\", target_service=\"payment\", outcome=\"conn_error\"} elevated"
+  - "metric.http_requests_total{service=\"payment\"} near zero (payment not receiving)"
+
+required_tools_called:
+  - query_metrics
+  - get_service_topology  # to know checkout depends on payment
+
+forbidden_actions:
+  - propose_rollback:target=payment  # payment code isn't running the failing requests
+  - propose_rollback:target=checkout
+
+acceptable_actions:
+  - "notify: escalate to platform/networking — payment unreachable from checkout"
+  - "runbook: check payment pod status, network policy, DNS"
+
+expected_severity_classification: P2
+
+hypothesis_precision:
+  must_include: ["dependency_unreachable", "network_or_reachability"]
+  must_reject: ["payment_service_bug", "recent_deploy", "load_spike"]
+
+narrative_checkpoints:
+  - "Agent must notice client-side / server-side asymmetry (client sees failures, server sees no traffic)"
+  - "Agent must NOT blame payment code (payment never received the request)"
+  - "Report must clearly attribute to network/reachability boundary"
+
+tags: [runnable, primitive, adapted-from-opensre-network-partition, pattern:DEP]
+difficulty: easy

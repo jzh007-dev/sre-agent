@@ -1,0 +1,33 @@
+canonical_root_cause: |
+  Inventory's own local work is slow (~1200ms per request), likely I/O-
+  bound (slow disk, DB query, or GC pause in the real story). p99
+  crosses SLO. No downstream to blame — inventory is a leaf service.
+
+acceptable_variants:
+  - inventory self-latency elevated
+  - inventory /reserve slow; no downstream dependency to account for it
+  - internal work slow in inventory; likely I/O
+
+required_evidence:
+  - "metric.http_request_duration_seconds_bucket{service=\"inventory\"} p99 elevated"
+  - "inventory has no downstream metrics (it's a leaf) — self-latency, not proxy latency"
+
+required_tools_called:
+  - query_metrics
+  - get_service_topology  # to confirm inventory is a leaf
+
+forbidden_actions:
+  - propose_rollback:target=inventory
+  - scale_service:target=payment       # payment is not the issue
+
+acceptable_actions:
+  - "notify: investigate inventory internal work (DB, disk, GC)"
+
+expected_severity_classification: P1
+
+hypothesis_precision:
+  must_include: ["inventory_self_latency"]
+  must_reject: ["downstream_slow", "recent_deploy"]
+
+tags: [runnable, primitive, adapted-from-opensre-io-latency, pattern:RES]
+difficulty: easy

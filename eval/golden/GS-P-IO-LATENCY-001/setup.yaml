@@ -1,0 +1,26 @@
+description: |
+  Primitive: injected latency on inventory /reserve, standing in for an
+  "I/O-bound" slow operation (disk seek, DB query, GC pause). Adapted
+  from OpenSRE's io-latency experiment. Different from network-delay
+  primitive by which service is slow — here inventory is a leaf, so the
+  latency IS its own internal time (no downstream to blame).
+
+duration_seconds: 120
+
+infra_commands: []
+deploy_records: []
+
+app_faults:
+  - service: inventory
+    spec:
+      name: gs-p-io-latency-001
+      type: latency_ms
+      target_endpoint: /reserve
+      config:
+        rate: 1.0
+        delay_ms: 1200
+
+load:
+  - method: POST
+    url: http://localhost:18080/orders
+    rate_per_sec: 3

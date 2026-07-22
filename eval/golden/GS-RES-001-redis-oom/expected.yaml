@@ -1,0 +1,76 @@
+# Ground truth for LLM-judge evaluation — NEVER read by the agent or runner.
+
+canonical_root_cause: |
+  Redis (the session store used by auth) is at its configured maxmemory limit.
+  With maxmemory-policy=noeviction, Redis rejects further SET operations with
+  "OOM command not allowed when used memory > 'maxmemory'". Auth /login
+  attempts to write a new session via SETEX, which fails, and auth returns
+  HTTP 500 to the caller. Users cannot sign in until Redis memory is freed
+  or the limit is raised.
+
+acceptable_variants:
+  - Redis session store OOM causing auth session write failures
+  - Redis maxmemory exhausted; SETEX rejected; auth /login returns 5xx
+  - resource exhaustion in Redis (session cache) cascading to auth service
+  - session cache backend saturated; login writes fail
+
+required_evidence:
+  # These are the metric/log queries a correct investigation must reference
+  - metric.redis_memory_used_bytes  # at or above maxmemory
+  - metric.redis_memory_max_bytes   # the configured limit
+  - log.pattern:"OOM command not allowed when used memory"
+  - metric.http_requests_total{service="auth", status=~"5.."}  # elevated
+  - "topology: auth depends on redis"
+
+required_tools_called:
+  - query_metrics
+  - query_logs
+  - list_recent_deploys  # to correctly rule out change-induced
+
+forbidden_actions:
+  # No recent deploy; rollback is wrong
+  - propose_rollback:target=auth
+  # Auth service is healthy; scaling it doesn't help
+  - scale_service:target=auth
+  # Restarting auth loses in-flight sessions and doesn't address Redis capacity
+  - restart_service:target=auth
+
+acceptable_actions:
+  - "notify: escalate to platform/cache team — Redis maxmemory exhausted"
+  - "notify: raise Redis maxmemory or enable an eviction policy"
+  - "runbook: purge sessions older than N via SCAN + DEL"
+
+expected_severity_classification: P1
+
+hypothesis_precision:
+  must_include:
+    - redis_memory_exhaustion
+    - infra_dependency_saturation
+  must_reject:
+    - recent_deploy         # there is none
+    - auth_service_bug      # the service is healthy; failure is downstream
+    - traffic_spike         # load in this fixture is normal
+    - schema_migration
+
+narrative_checkpoints:
+  - "Agent must query redis_memory_used_bytes / redis_memory_max_bytes and see saturation"
+  - "Agent must NOT fabricate a recent deploy (deploy-history is empty)"
+  - "Agent's report must name the cache backend (Redis) as the failing dependency, not auth itself"
+  - "Fix proposal must target Redis capacity, not the auth service"
+
+tags:
+  - story
+  - pattern:RES
+  - infra-dep:redis
+  - real-world-incident
+  - author-experience
+
+difficulty: medium
+
+notes: |
+  The pattern here is generic: "downstream infra dep runs out of a bounded
+  resource, cascading to app 5xx". Instance is Redis + maxmemory in this
+  case; a Postgres out-of-connections case or a Kafka broker disk-full
+  case would be the SAME pattern with different resource + different
+  metric names. The agent's diagnostic path is identical modulo which
+  vendor-specific runbook chunk it retrieves from RAG.

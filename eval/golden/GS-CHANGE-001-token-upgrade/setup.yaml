@@ -1,0 +1,73 @@
+description: |
+  Story: token signature algorithm upgrade with insufficient backward
+  compatibility. Auth service deployed v2.0.0 which changed the token
+  signing algorithm (e.g. HS256 → ES256, or a key rotation without
+  overlap). Existing sessions in Redis are still signed with v1; when
+  users' clients present those cached tokens to /verify, the new v2
+  verifier rejects them. Users get logged out en masse.
+
+  Real production incident (author's own experience, anonymized):
+  authentication library upgrade shipped a signature-format change with
+  the assumption "clients will just re-login". At scale, the noise looked
+  like an auth outage; oncall was paged because 5xx rate on auth crossed
+  SLO.
+
+  Correct diagnosis:
+    - Auth v2.0.0 deployed in the last hour (deploy-history)
+    - Log signature "token signature mismatch: expected v2, got v1" is
+      the definitive smoking gun
+    - No infra saturation (Redis fine, downstream fine)
+    - Fix: either roll forward to a version with backward-compat token
+      verification, or bulk-invalidate v1 tokens forcing re-login (with
+      user comms)
+
+duration_seconds: 120
+
+infra_commands: []
+
+# Recent auth deploy — the change that caused this incident. Agent's
+# `list_recent_deploys` tool call should surface this.
+deploy_records:
+  - service: auth
+    version: v2.0.0
+    change_summary: "Rotated token signature algorithm: v1 (HS256) → v2 (ES256). No overlap window; cached v1 tokens will fail verification against v2 verifier."
+    author: platform-security
+    config_files_changed:
+      - auth/token.py
+      - auth/config/token.yaml
+    diff_url: "https://git/auth/compare/v1.9.4...v2.0.0"
+
+# Emit the specific log signature that identifies the mismatch + return
+# 500 on /verify to make it visible to HighErrorRate. In a real system
+# 401 would be more accurate; we bump to 500 here because our alert rules
+# are 5xx-based (mock scope; production would have both 4xx and 5xx SLOs).
+app_faults:
+  - service: auth
+    spec:
+      name: token-mismatch-errors
+      type: error_rate
+      target_endpoint: /verify
+      config:
+        rate: 0.6
+        status_code: 500
+  - service: auth
+    spec:
+      name: token-mismatch-log
+      type: log_pattern_emit
+      target_endpoint: /verify
+      config:
+        pattern: "token signature mismatch: expected v2, got v1"
+        rate: 0.6
+        extra:
+          expected_version: v2
+          got_version: v1
+          reason: token_version_mismatch
+
+# Drive verify requests carrying stale v1 tokens. Auth's fault middleware
+# does not care about the token contents; it fires the fault by request
+# path. In a real trace the log would carry the actual token version;
+# here we set it explicitly via `extra` fields on the log fault.
+load:
+  - method: GET
+    url: "http://localhost:18086/verify?token=v1:stale-cached-token"
+    rate_per_sec: 5

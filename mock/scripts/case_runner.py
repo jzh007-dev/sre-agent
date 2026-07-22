@@ -112,6 +112,22 @@ def apply_infra_commands(commands: list[dict[str, Any]]) -> None:
         _docker_exec(c["target"], c["cmd"])
 
 
+def apply_host_commands(commands: list[list[str]]) -> None:
+    """Run arbitrary commands on the HOST (as opposed to inside a container).
+    Used for actions the docker daemon owns — restart, kill, network manipulation.
+    Sequential; each command's exit code is logged but does not abort the run."""
+    for cmd in commands or []:
+        print(f"  [host] {' '.join(cmd)}")
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                print(f"    ! exit {r.returncode}: {r.stderr.strip()[:200]}")
+            elif r.stdout.strip():
+                print(f"    → {r.stdout.strip()[:200]}")
+        except subprocess.TimeoutExpired:
+            print(f"    ! timeout")
+
+
 def apply_deploy_records(records: list[dict[str, Any]]) -> None:
     if not records:
         return
@@ -244,6 +260,7 @@ async def run_case(case: dict[str, Any]) -> None:
 
     print("\n--- Phase 2: apply setup ---")
     apply_infra_commands(setup.get("infra_commands", []))
+    apply_host_commands(setup.get("host_commands", []))
     apply_deploy_records(setup.get("deploy_records", []))
     apply_app_faults(setup.get("app_faults", []))
 

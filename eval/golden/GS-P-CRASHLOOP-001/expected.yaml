@@ -1,0 +1,43 @@
+canonical_root_cause: |
+  Payment service is in a restart loop — the container is being killed
+  and restarted repeatedly. Downstream services see brief conn_error
+  bursts during each restart window. In production this would come from
+  kubelet restarting a CrashLoopBackOff pod (OOMKilled, panicking on
+  startup, failing liveness probe, etc.).
+
+acceptable_variants:
+  - payment container crashlooping
+  - payment intermittently unavailable due to restarts
+  - up metric flapping on payment
+  - CrashLoopBackOff-style symptom on payment
+
+required_evidence:
+  - "metric.up{service=\"payment\"} intermittently 0 during the window"
+  - "metric.downstream_requests_total{service=\"checkout\", target_service=\"payment\", outcome=\"conn_error\"} elevated in bursts"
+  - "gaps in payment's own server-side metrics during restart windows"
+
+required_tools_called:
+  - query_metrics
+  - get_service_topology
+
+forbidden_actions:
+  - propose_rollback:target=checkout
+
+acceptable_actions:
+  - "runbook: fetch payment pod status / restart count (kubelet or docker events)"
+  - "runbook: inspect payment startup logs for panic / OOM signature"
+  - "notify: escalate to platform if restarts are OOM-driven (may need memory limit bump)"
+
+expected_severity_classification: P2
+
+hypothesis_precision:
+  must_include: ["service_restart_loop", "crashloop"]
+  must_reject: ["network_partition", "downstream_error_from_payment_code"]
+
+narrative_checkpoints:
+  - "Agent must recognize the FLAPPING pattern in up{} — not sustained down"
+  - "Agent must correlate the conn_error bursts with the up dips"
+  - "Report must recommend inspecting payment startup / restart cause, not blaming callers"
+
+tags: [runnable, primitive, adapted-from-opensre-crashloop, pattern:RES]
+difficulty: medium

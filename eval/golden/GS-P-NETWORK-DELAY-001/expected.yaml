@@ -1,0 +1,32 @@
+canonical_root_cause: |
+  Latency has been injected on payment's /charge endpoint (800ms per
+  request). p99 crosses the 1s HighLatency alert threshold. Latency is
+  the whole story — error rates are normal, no recent deploy.
+
+acceptable_variants:
+  - payment latency elevated with normal error rate
+  - request duration on payment /charge exceeds SLO; downstream/upstream fine
+
+required_evidence:
+  - "metric.http_request_duration_seconds_bucket{service=\"payment\"} p99 elevated"
+  - "metric.http_requests_total{service=\"payment\",status=~\"5..\"} normal (rules out errors)"
+  - "downstream_request_duration_seconds{target_service=\"payment\"} elevated on checkout"
+
+required_tools_called:
+  - query_metrics
+
+forbidden_actions:
+  - propose_rollback:target=payment  # no deploy
+  - restart_service:target=payment
+
+acceptable_actions:
+  - "notify: investigate payment endpoint latency source"
+
+expected_severity_classification: P1
+
+hypothesis_precision:
+  must_include: ["payment_latency"]
+  must_reject: ["recent_deploy", "downstream_error", "traffic_spike"]
+
+tags: [runnable, primitive, adapted-from-opensre-network-delay, pattern:DEP]
+difficulty: easy

@@ -1,0 +1,32 @@
+description: |
+  Primitive: repeated container restarts (crashloop analog). Adapted from
+  OpenSRE's crashloop experiment. In k8s the kubelet restarts a
+  CrashLoopBackOff pod automatically; in docker-compose the
+  `restart: unless-stopped` policy does the equivalent when we send a
+  SIGKILL to PID 1 inside the container.
+
+  Signal shape:
+    - up{service="payment"} intermittently 0
+    - checkout's downstream calls see conn_error bursts during restarts
+    - payment's server-side metrics show gaps (no scrapes while down)
+
+  Diagnostic distinction from GS-P-DEPENDENCY-DOWN-001:
+    - dependency-down: payment doesn't recover — sustained unavailability
+    - crashloop: payment briefly reachable between restarts, up flaps
+
+duration_seconds: 90
+
+# Repeated container restarts run on the host, not inside a container.
+# Sequential — docker restart is synchronous. Interspersed with sleeps
+# so restart cycles are spaced out and each triggers a fresh scrape gap.
+host_commands:
+  - [bash, -c, "for i in 1 2 3 4; do echo '--- restart' $i; docker restart mock-payment; sleep 12; done"]
+
+infra_commands: []
+deploy_records: []
+app_faults: []
+
+load:
+  - method: POST
+    url: http://localhost:18080/orders
+    rate_per_sec: 3

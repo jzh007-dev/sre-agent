@@ -1,0 +1,24 @@
+{
+  "_meta": {
+    "purpose": "Runnable primitive adapted from OpenSRE's io-latency experiment. Simulates a service whose local work is slow (disk / DB query / GC pause). Same primitive as network-delay but applied on a service's own endpoint rather than a downstream — signals the difference between self-slow and dependency-slow."
+  },
+  "title": "[Triggered] inventory p99 latency above 1s",
+  "alert_source": "alertmanager",
+  "alert_name": "HighLatency",
+  "severity": "P1",
+  "message": "p99 latency for inventory has been > 1s for 1 minute.",
+  "commonLabels": {
+    "alertname": "HighLatency",
+    "service": "inventory",
+    "severity": "P1",
+    "category": "reliability",
+    "env": "mock",
+    "cluster": "sre-agent-mock"
+  },
+  "commonAnnotations": {
+    "summary": "inventory p99 latency above 1s",
+    "description": "p99 latency for inventory has been > 1s for 1 minute.",
+    "runbook_url": "https://wiki/runbooks/inventory-latency",
+    "correlation_id": "gs-p-io-latency-001"
+  }
+}

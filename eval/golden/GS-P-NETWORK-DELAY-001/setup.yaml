@@ -1,0 +1,30 @@
+description: |
+  Primitive: injected latency on payment /charge. 800ms delay added to
+  every request. p99 crosses the 1s HighLatency threshold. Adapted from
+  OpenSRE's network-delay chaos experiment.
+
+  Signal shape:
+    - payment p99 latency high
+    - payment 5xx rate normal (latency, not errors)
+    - downstream_request_duration_seconds from checkout → payment elevated
+    - checkout's own local latency also elevated (blocked on payment)
+
+duration_seconds: 120
+
+infra_commands: []
+deploy_records: []
+
+app_faults:
+  - service: payment
+    spec:
+      name: gs-p-network-delay-001
+      type: latency_ms
+      target_endpoint: /charge
+      config:
+        rate: 1.0
+        delay_ms: 800
+
+load:
+  - method: POST
+    url: http://localhost:18080/orders
+    rate_per_sec: 3

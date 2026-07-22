@@ -1,0 +1,75 @@
+canonical_root_cause: |
+  A 3rd-party dependency of payment (external card-provider) is timing out
+  every request. Payment's outbound calls to card-provider.example.com hit
+  their configured 3s read timeout and return HTTP 500 to their own callers.
+  Our payment service is otherwise healthy (no CPU/memory pressure, no
+  recent deploy). The failure is at an external boundary we do not own.
+
+acceptable_variants:
+  - external card processor unavailable causing payment 5xx
+  - 3rd-party dependency (card-provider) timing out — payment cascade
+  - payment is not the failure — its external card auth vendor is
+  - upstream dependency card-provider.example.com is unreachable/slow
+
+required_evidence:
+  - log.pattern:"card-provider.example.com read timeout"
+  - metric.http_requests_total{service="payment", status=~"5.."}  # elevated
+  - "no recent deploy for payment (deploy-history empty)"
+  - "payment CPU/memory metrics NOT elevated (rules out payment overload)"
+  # If the agent knows to check: downstream_requests_total on checkout
+  # would show target=payment outcomes as http_5xx (not conn_error/timeout,
+  # because payment itself is responding — just with 500)
+
+required_tools_called:
+  - query_logs           # to find the card-provider log signature
+  - query_metrics        # to see 5xx rate + confirm payment resources fine
+  - list_recent_deploys  # to correctly rule out change
+
+forbidden_actions:
+  - propose_rollback:target=payment    # payment code is fine
+  - propose_rollback:target=checkout
+  - scale_service:target=payment       # payment isn't overloaded
+  - restart_service:target=payment     # would not fix external vendor
+
+acceptable_actions:
+  - "notify: escalate to payments-vendor-liaison — 3rd-party card-provider unavailable"
+  - "notify: contact vendor status page / on-call"
+  - "runbook: enable degraded checkout flow (cash-on-delivery, alternate provider)"
+  - "runbook: temporarily fail-open on payment auth if business policy allows"
+
+expected_severity_classification: P1
+
+hypothesis_precision:
+  must_include:
+    - external_dependency_failure
+    - third_party_vendor_issue
+  must_reject:
+    - recent_deploy
+    - payment_service_bug
+    - traffic_spike
+    - infra_saturation_our_side
+
+narrative_checkpoints:
+  - "Agent must find the log signature that identifies card-provider as the failing dependency"
+  - "Agent must NOT propose changes to payment code (payment is a victim, not the cause)"
+  - "Agent must NOT scale payment (idle-waiting, not overloaded)"
+  - "Report must clearly attribute the failure to an EXTERNAL dependency, not internal"
+
+tags:
+  - story
+  - pattern:DEP
+  - external-dependency
+  - real-world-incident
+  - author-experience
+
+difficulty: medium
+
+notes: |
+  The pattern is external-dependency-failure. Instance here is a card
+  authorization vendor. Same pattern applies unchanged to a Stripe
+  timeout, a Twilio API outage, a Google Maps API rate limit — all are
+  external-DEP-pattern incidents with different vendor-specific log
+  signatures. The agent's job is to (1) identify that failure boundary
+  is external, (2) name the specific vendor via log evidence, (3)
+  propose actions that address boundary ownership (contact vendor +
+  degraded mode) rather than blaming internal code.

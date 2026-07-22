@@ -1,0 +1,25 @@
+{
+  "_meta": {
+    "purpose": "Runnable primitive adapted from OpenSRE's crashloop experiment. Payment container is restarted repeatedly during the run. `up{service=\"payment\"}` dips to 0 during each restart; downstream services see conn_error bursts."
+  },
+  "title": "[Triggered] payment 5xx / downstream failure",
+  "alert_source": "alertmanager",
+  "alert_name": "DownstreamFailureRateHigh",
+  "severity": "P2",
+  "message": "Downstream calls to payment failing during restart cycles.",
+  "commonLabels": {
+    "alertname": "DownstreamFailureRateHigh",
+    "service": "checkout",
+    "target_service": "payment",
+    "severity": "P2",
+    "category": "reliability",
+    "env": "mock",
+    "cluster": "sre-agent-mock"
+  },
+  "commonAnnotations": {
+    "summary": "checkout → payment failure rate above 5%",
+    "description": "Downstream failures during payment restart cycles.",
+    "runbook_url": "https://wiki/runbooks/service-crashloop",
+    "correlation_id": "gs-p-crashloop-001"
+  }
+}

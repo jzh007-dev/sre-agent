@@ -1,0 +1,26 @@
+{
+  "_meta": {
+    "purpose": "Story case: token signing algorithm was upgraded (v1 → v2, HS256 → ES256 style) in an auth deploy that lacked backward compatibility. Existing cached tokens (in Redis) that were signed with v1 fail verification against v2 verifier, causing user login-related 5xx. Reproduces author's own production experience. Pattern is CHANGE (deploy caused) with a strong secondary tag of DATA (existing data in cache incompatible with new code)."
+  },
+  "title": "[Triggered] auth 5xx rate above 5%",
+  "alert_source": "alertmanager",
+  "alert_name": "HighErrorRate",
+  "severity": "P1",
+  "message": "5xx rate for auth has been > 5% for 1 minute.",
+  "text": "auth service /verify is failing at high rate; users see logout / re-login required.",
+  "commonLabels": {
+    "alertname": "HighErrorRate",
+    "service": "auth",
+    "severity": "P1",
+    "category": "reliability",
+    "env": "mock",
+    "cluster": "sre-agent-mock"
+  },
+  "commonAnnotations": {
+    "summary": "auth 5xx rate above 5%",
+    "description": "5xx rate for auth has been > 5% for 1 minute.",
+    "query": "sum by (service) (rate(http_requests_total{service=\"auth\",status=~\"5..\"}[1m]))",
+    "runbook_url": "https://wiki/runbooks/auth-5xx",
+    "correlation_id": "gs-change-001-token-upgrade"
+  }
+}

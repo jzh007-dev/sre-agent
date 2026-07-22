@@ -1,0 +1,26 @@
+{
+  "_meta": {
+    "purpose": "Story case: 3rd-party card provider took a maintenance window that blocked its own DB, causing our payment service's outbound calls to time out. Reproduces author's own production experience (anonymized). Pattern is DEP — downstream dependency (in this case external) becomes unavailable."
+  },
+  "title": "[Triggered] payment 5xx rate above 5%",
+  "alert_source": "alertmanager",
+  "alert_name": "HighErrorRate",
+  "severity": "P1",
+  "message": "5xx rate for payment has been > 5% for 1 minute.",
+  "text": "payment /charge is returning HTTP 500 to callers.",
+  "commonLabels": {
+    "alertname": "HighErrorRate",
+    "service": "payment",
+    "severity": "P1",
+    "category": "reliability",
+    "env": "mock",
+    "cluster": "sre-agent-mock"
+  },
+  "commonAnnotations": {
+    "summary": "payment 5xx rate above 5%",
+    "description": "5xx rate for payment has been > 5% for 1 minute.",
+    "query": "sum by (service) (rate(http_requests_total{service=\"payment\",status=~\"5..\"}[1m]))",
+    "runbook_url": "https://wiki/runbooks/payment-5xx",
+    "correlation_id": "gs-dep-001-card-provider"
+  }
+}

@@ -28,8 +28,8 @@ Goal: a docker-compose local stack that produces realistic metrics + logs + can 
 | L3 | Counter/Gauge/Histogram/Summary internals; label cardinality math; PromQL essentials; RED / USE frameworks | (conceptual — informs future metric design) | `[x]` |
 | L4 | Prometheus scrape config, ClickHouse schema (LowCardinality, partition, sort key, TTL), Vector 3-stage pipeline, log timestamp normalization | `mock/{docker-compose.yml, prometheus/, clickhouse/init.sql, vector/vector.yaml}` | `[x]` |
 | L5 | Multi-service call graph; httpx client; correlation_id propagation via header; route-pattern label to avoid cardinality explosion; client-side downstream metrics | `mock/services/{gateway, payment, inventory}/` + updates to checkout to call downstreams | `[x]` |
-| L6 | Alerting layer + fault injection: real `AlertManager` with SLO-based rules; per-service `/admin/faults` (types: `error_rate`, `latency_ms`, `log_pattern_emit`, `dependency_fail`); PD-shaped `incident-tracker` closing the webhook loop; real Redis + `redis_exporter` (infra deps are real components, not Python mocks). Recalibration mid-lesson dropped a Python session-cache mock and infra-layer paging in favor of the production-standard shape. | `mock/alertmanager/`, `mock/prometheus/alerts.yml`, `mock/services/_shared/fault.py`, `mock/services/incident_tracker/`, real `redis` + `redis-exporter` in compose | `[~]` |
-| L7 | Golden case structure + case runner: 3-file case layout (`alert.json` shaped like an AlertManager webhook + `setup.yaml` for reproducible fault application + `expected.yaml` for LLM-judge eval), auth-svc for user-facing SLO surface, deploy-history mock for change-induced cases, 3 story cases from real production incidents (patterned across `RES / DEP / CHANGE+DATA`) + ~5 primitive cases adapted from OpenSRE chaos experiments | `eval/golden/GS-*/`, `mock/services/auth/`, `mock/services/deploy_history/`, `mock/scripts/case_runner.py` | `[ ]` |
+| L6 | Alerting layer + fault injection: real `AlertManager` with SLO-based rules; per-service `/admin/faults` (types: `error_rate`, `latency_ms`, `log_pattern_emit`, `dependency_fail`); PD-shaped `incident-tracker` closing the webhook loop; real Redis + `redis_exporter` (infra deps are real components, not Python mocks). Recalibration mid-lesson dropped a Python session-cache mock and infra-layer paging in favor of the production-standard shape. | `mock/alertmanager/`, `mock/prometheus/alerts.yml`, `mock/services/_shared/fault.py`, `mock/services/incident_tracker/`, real `redis` + `redis-exporter` in compose | `[x]` |
+| L7 | Golden case structure + case runner: 3-file case layout (`alert.json` shaped like an AlertManager webhook + `setup.yaml` for reproducible fault application + `expected.yaml` for LLM-judge eval), auth-svc for user-facing SLO surface, deploy-history mock for change-induced cases, 3 story cases from real production incidents (patterned across `RES / DEP / CHANGE+DATA`) + 5 primitive cases adapted from OpenSRE chaos experiments | `eval/golden/GS-*/`, `mock/services/auth/`, `mock/services/deploy_history/`, `mock/scripts/case_runner.py` | `[x]` |
 
 **Week 1 exit criteria**: `python mock/scripts/case_runner.py <case-id>` applies the case's `setup.yaml` (faults + Redis config + deploy fixture), waits for the expected AlertManager alert to fire, and dumps the tracked incident from `incident-tracker` — all end-to-end against real Prometheus + real AlertManager + real Redis. 3+ story cases + 5+ primitive cases pass; each case documents its expected root cause for the future Week 2+ agent eval.
 
@@ -130,13 +130,17 @@ These aren't in a specific week — bit-by-bit each week:
 
 ## Current pointer
 
-**Session end date**: 2026-07-22  
-**Last completed**: L6 Commit A (AlertManager + fault framework), Commit B (session-cache mock + incident-tracker + alert-loop closed), then **architectural recalibration**:
-  - Python session-cache mock **replaced by real `redis:7-alpine` + `oliver006/redis_exporter`** — infra deps are real components, not synthesized
-  - `memory_pressure` fault type + `SessionCacheMemoryPressure` alert **removed** — infra metrics are scraped for query/dashboard, not paged (see [TRADEOFFS.md §17](../TRADEOFFS.md))
-  - Case naming shifted from tech-specific → **6 diagnostic patterns**: `LOAD / CHANGE / DEP / RES / DATA / ENV`. `GS-QPS-SPIKE-001` renamed to `GS-LOAD-001`. Middleware-specific knowledge lives in RAG runbooks, not in cases or agent code (see [TRADEOFFS.md §16](../TRADEOFFS.md))
+**Session end date**: 2026-07-23  
+**Last completed**: **Week 1 fully done**. Final mock env has 12 real containers; case runner drives 8 runnable golden cases end-to-end.
 
-**Next up**: L6 Commit C — auth-svc + deploy-history mock + 3-file case structure (`alert.json + setup.yaml + expected.yaml` per HolmesGPT+OpenSRE hybrid) + 3 story cases (patterned after user's real production experience) + ~5 primitive cases adapted from OpenSRE chaos experiments + case runner script  
+Key milestones from this session:
+- L6 Commit A `d87067c` — AlertManager + fault framework + incident tracker (alert loop closed)
+- L6 Commit B `0695fe6` — session-cache mock + memory_pressure/log_pattern/dependency_fail faults (later partially rolled back in recalibration)
+- L6 Commit `92698cd` — **architectural recalibration**: Python session-cache mock replaced by real `redis:7-alpine` + `oliver006/redis_exporter`; `memory_pressure` fault + `SessionCacheMemoryPressure` alert removed (infra metrics scraped for query, not paged — see [TRADEOFFS.md §17](../TRADEOFFS.md)); case naming shifted to 6 diagnostic patterns (LOAD/CHANGE/DEP/RES/DATA/ENV) — middleware knowledge lives in RAG runbooks, not in cases or agent code (see [TRADEOFFS.md §16](../TRADEOFFS.md))
+- L7 Commit C1 `81ce3cc` — auth-svc using real Redis client; deploy-history mock; case runner; 3-file case structure; GS-P-HTTP-ABORT-001 primitive
+- L7 Commit C2 (this commit) — 3 story cases (RES/DEP/CHANGE) reproducing author's real production experience + 4 more primitive cases adapted from OpenSRE (network-delay, io-latency, dependency-down, crashloop)
+
+**Next up**: Week 2 L1 — MCP protocol basics; scaffold `agent/mcp/observability_mcp/` with 3 read tools (`query_metrics`, `query_logs`, `get_service_topology`) that the agent will call against the live mock env. This is the first agent-side code.  
 **Blockers**: none  
 
 **Positioning reminder for next sessions** (this is a portfolio project for a mature-company SRE role, not a teaching project):
@@ -146,6 +150,10 @@ These aren't in a specific week — bit-by-bit each week:
 - Alert design: only user-facing SLO violations page; infra signals stay in dashboards + query surface
 
 **Verified live before end of session**:
-- 10 containers healthy (gateway/checkout/payment/inventory + redis + redis-exporter + incident-tracker + prom/alertmanager + CH/vector)
-- End-to-end alert flow: `POST /admin/faults` on checkout with `error_rate=0.5` → `HighErrorRate` fires on both checkout and gateway (cascade) → AlertManager routes to `incident-tracker` webhook → `GET /incidents` returns two tracked incidents with full labels + PD-shaped state machine
-- Correlation id propagates across 4 services; ClickHouse `sre.logs` table stores rows with `correlation_id` for cross-service replay
+- **12 real containers** healthy: `gateway / checkout / payment / inventory / auth / deploy-history / incident-tracker + redis / redis-exporter / prometheus / alertmanager / clickhouse / vector`
+- 8 runnable golden cases pass via `python mock/scripts/case_runner.py <id>`:
+  - Story: `GS-RES-001-redis-oom`, `GS-DEP-001-card-provider-block`, `GS-CHANGE-001-token-upgrade`
+  - Primitive: `GS-P-HTTP-ABORT-001`, `GS-P-NETWORK-DELAY-001`, `GS-P-IO-LATENCY-001`, `GS-P-DEPENDENCY-DOWN-001`, `GS-P-CRASHLOOP-001`
+- `GS-RES-001-redis-oom` verified: `redis-cli CONFIG SET maxmemory 5mb` + `DEBUG POPULATE` on real Redis → auth `/login` SETEX fails with real Redis OOM error → `HighErrorRate` alert on `auth` fires within `for: 1m` → AlertManager webhooks `incident-tracker` → incident state=triggered
+- `GS-P-DEPENDENCY-DOWN-001` verified: 4-alert cascade (`DownstreamFailureRateHigh checkout→payment` + `DownstreamFailureRateHigh gateway→checkout` + `HighErrorRate` on both checkout and gateway) — real cascade signal set the SRE agent must correlate
+- Metric names in-mock match production verbatim: `redis_memory_used_bytes`, `redis_memory_max_bytes`, `http_requests_total`, `downstream_requests_total{outcome=...}` — no per-mock translation layer needed by future agent

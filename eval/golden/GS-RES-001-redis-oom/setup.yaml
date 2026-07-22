@@ -1,0 +1,48 @@
+description: |
+  Story: Redis OOM cascade → auth login failures.
+
+  Real production incident this reproduces (author's own experience,
+  anonymized): an e-commerce cluster's Redis session store hit its
+  configured maxmemory during a promo event. Redis rejected further
+  writes with "OOM command not allowed when used memory > 'maxmemory'",
+  which propagated as HTTP 500 from the auth service's /login endpoint.
+  Users saw "login failed", oncall was paged for auth 5xx SLO breach.
+
+  Naive diagnosis blames auth itself. Correct diagnosis is:
+    - auth service is fine (health, deploys, config all normal)
+    - Redis memory is at maxmemory (redis_memory_used_bytes = redis_memory_max_bytes)
+    - Redis logs / errors show "OOM command not allowed"
+    - Downstream metrics on auth (http_requests_total by status) show 5xx spike
+      correlated with Redis memory saturation
+
+  Fix path is capacity — either raise maxmemory, evict, or restart Redis.
+  NOT a rollback (no deploy involved), NOT scaling auth (auth is healthy).
+
+duration_seconds: 120
+
+# The fault lives on the real Redis, not injected via any Python framework —
+# uses Redis's own admin surface (CONFIG SET + DEBUG POPULATE). This is what
+# a real SRE would do in a chaos-engineering exercise against prod Redis.
+infra_commands:
+  - target: mock-redis
+    cmd: [redis-cli, CONFIG, SET, maxmemory, 5mb]
+  - target: mock-redis
+    cmd: [redis-cli, CONFIG, SET, maxmemory-policy, noeviction]
+  - target: mock-redis
+    cmd: [redis-cli, DEBUG, POPULATE, "100000", large_key_, "500"]
+
+# Deliberately empty — this is a resource-induced incident with NO recent
+# deploy. Agent must NOT falsely attribute this to a deploy that didn't happen.
+deploy_records: []
+
+# No app-service faults. The failure comes from downstream Redis; auth's
+# own code faithfully propagates the cache error to the caller.
+app_faults: []
+
+# Sustained login attempts drive Redis SETEX writes which then fail with OOM.
+load:
+  - method: POST
+    url: http://localhost:18086/login
+    body:
+      username: alice
+    rate_per_sec: 4

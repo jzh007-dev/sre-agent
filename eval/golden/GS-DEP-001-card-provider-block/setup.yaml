@@ -1,0 +1,59 @@
+description: |
+  Story: 3rd-party card provider's own DB maintenance window blocks payment
+  authorization calls; our payment service's downstream requests time out and
+  the service returns HTTP 500 to checkout.
+
+  Real production incident (author's own experience, anonymized): a payment
+  gateway vendor scheduled DB work in a maintenance window they announced
+  loosely; during the window their authorization endpoint hung. Our payment
+  service's calls out to that endpoint timed out; from our observers' view
+  it looked like OUR payment was broken. Correct diagnosis is that payment
+  itself is healthy — the failure is at a boundary we don't own.
+
+  Signals a correct diagnosis relies on:
+    - payment 5xx rate is elevated
+    - No recent deploy on any of our services
+    - Payment logs contain a specific 3rd-party timeout signature
+      ("card-provider.example.com read timeout after 3000ms")
+    - Payment CPU / memory / thread pool metrics are normal — payment is
+      *idle-waiting*, not overloaded
+
+duration_seconds: 120
+
+infra_commands: []
+
+# No recent deploy — this is dependency-induced, not change-induced.
+deploy_records: []
+
+# Simulate the 3rd-party failure by:
+# 1. error_rate on payment /charge — returns 500 for every request, mimicking
+#    what payment would do after its outbound call times out
+# 2. log_pattern_emit — payment's actual log line about the 3rd party. The
+#    agent's log query should find this pattern and identify the boundary.
+app_faults:
+  - service: payment
+    spec:
+      name: card-provider-timeout-errors
+      type: error_rate
+      target_endpoint: /charge
+      config:
+        rate: 1.0
+        status_code: 500
+  - service: payment
+    spec:
+      name: card-provider-timeout-log
+      type: log_pattern_emit
+      target_endpoint: /charge
+      config:
+        pattern: "downstream card-provider.example.com read timeout after 3000ms"
+        rate: 1.0
+        extra:
+          downstream: card-provider.example.com
+          downstream_type: external
+          timeout_ms: 3000
+
+# Drive load through the gateway so checkout hits payment.
+load:
+  - method: POST
+    url: http://localhost:18080/orders
+    rate_per_sec: 3

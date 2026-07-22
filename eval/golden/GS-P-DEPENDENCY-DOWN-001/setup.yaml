@@ -1,0 +1,28 @@
+description: |
+  Primitive: complete downstream unavailability. All of checkout's outbound
+  calls to payment raise ConnectError (via the dependency_fail fault type),
+  simulating a network partition or payment pod being evicted. Client-side
+  metric on checkout shows outcome=conn_error dominating. Payment's own
+  server-side metrics show ZERO traffic — a diagnostic clue that this is
+  network/reachability, not a payment bug.
+
+  Adapted from OpenSRE's network-partition experiment.
+
+duration_seconds: 120
+
+infra_commands: []
+deploy_records: []
+
+app_faults:
+  - service: checkout
+    spec:
+      name: gs-p-dependency-down-001
+      type: dependency_fail
+      config:
+        target_service: payment
+        rate: 1.0
+
+load:
+  - method: POST
+    url: http://localhost:18080/orders
+    rate_per_sec: 3

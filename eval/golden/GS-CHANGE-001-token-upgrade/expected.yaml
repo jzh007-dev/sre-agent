@@ -1,0 +1,74 @@
+canonical_root_cause: |
+  Auth v2.0.0 (deployed within the last hour) changed the token signing
+  algorithm from v1 to v2 without a compatibility window. Sessions cached
+  in Redis before the deploy are signed v1; the post-deploy verifier
+  expects v2 and rejects them. Every /verify request carrying a
+  pre-deploy token fails with "token signature mismatch: expected v2,
+  got v1". Users appear to be spontaneously logged out.
+
+acceptable_variants:
+  - auth v2.0.0 broke backward compatibility with cached v1 tokens
+  - token algorithm rotation without overlap; existing sessions invalidated
+  - deploy-induced session incompatibility; auth rejects pre-deploy tokens
+  - v2.0.0 signature change breaks all v1 tokens still in cache
+
+required_evidence:
+  - deploy_record.auth.v2_0_0
+  - deploy_record.change_summary  # mentions the token algo change
+  - log.pattern:"token signature mismatch: expected v2, got v1"
+  - metric.http_requests_total{service="auth", endpoint="/verify", status=~"5.."}
+  - "no infra saturation (redis, downstream all healthy)"
+
+required_tools_called:
+  - list_recent_deploys   # THE key call — surfaces v2.0.0
+  - query_logs            # finds the mismatch signature
+  - query_metrics
+  - get_deploy_diff       # if agent inspects diff, it should see auth/token.py changed
+
+forbidden_actions:
+  - restart_service:target=auth       # doesn't help; new deploy is the problem
+  - scale_service:target=auth         # not a capacity issue
+  - restart_service:target=redis      # redis is healthy
+
+acceptable_actions:
+  - propose_rollback:target=auth:to_version=v1.9.4  # correct — undoes the breaking change
+  - "notify: forward-fix v2.0.1 with backward-compat verify chain (accept v1 AND v2 for N days)"
+  - "notify: bulk-invalidate v1 sessions in Redis + user comms about forced re-login"
+
+expected_severity_classification: P1
+
+hypothesis_precision:
+  must_include:
+    - recent_deploy_incompatibility
+    - token_algorithm_change
+    - change_induced
+  must_reject:
+    - infra_saturation
+    - external_dependency
+    - traffic_spike
+    - auth_service_bug   # v2.0.0 works as designed; the bug is compatibility, not code
+
+narrative_checkpoints:
+  - "Agent MUST call list_recent_deploys and see v2.0.0"
+  - "Agent MUST correlate the log signature with the deploy's change_summary"
+  - "Agent should propose a rollback OR a forward-fix with backward-compat, not both blindly"
+  - "Agent must NOT blame Redis (fine) or downstream (there is none here)"
+
+tags:
+  - story
+  - pattern:CHANGE
+  - pattern:DATA           # secondary tag — the failure mode is stale data + new code
+  - real-world-incident
+  - author-experience
+
+difficulty: hard
+
+notes: |
+  This case exercises the CHANGE + DATA pattern intersection: a deploy
+  broke compatibility with data (cached sessions) written by the previous
+  version. The generic pattern repeats: schema migrations without
+  online-migration, protobuf field-number reuse, config format changes.
+  The middleware (Redis) is incidental — the same failure shape would
+  emerge with Memcached, a Postgres session table, or a custom cache.
+  A good agent's answer names "backward-incompatible deploy" as the
+  root cause and proposes either rollback or additive-compat forward-fix.
