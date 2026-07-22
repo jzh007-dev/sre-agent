@@ -11,12 +11,16 @@
 #   in mock. Prod defaults are ~30s / 5m.
 
 route:
-  receiver: null-receiver
+  receiver: incident-tracker
   group_by: [alertname, service]
   group_wait: 5s
   group_interval: 10s
   repeat_interval: 1m
 
 receivers:
-  - name: null-receiver
-    # No webhook_configs yet — alerts are visible in the AlertManager UI.
+  - name: incident-tracker
+    webhook_configs:
+      - url: http://incident-tracker:8000/webhook/alertmanager
+        send_resolved: true
+        # AlertManager retries on non-2xx; the mock tracker responds 200
+        # even on partial ingest issues, so retries are quiet in practice.

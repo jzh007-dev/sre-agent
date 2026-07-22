@@ -100,6 +100,54 @@ services:
       - mocknet
     restart: unless-stopped
 
+  # Redis-shaped mock. Real Redis uses bgsave forks that can OOM under
+  # memory pressure — we simulate the signal shape (gauge climb → 5xx +
+  # canonical OOM log line) without running actual Redis. Interview point:
+  # the mock is a *signal generator*, not a functional Redis.
+  session-cache:
+    build:
+      <<: *app-build
+      args:
+        SERVICE: session_cache
+    image: sre-agent-mock/session-cache:latest
+    container_name: mock-session-cache
+    environment:
+      SERVICE_NAME: session-cache
+      SERVICE_VERSION: v1.0.0
+      LOG_LEVEL: INFO
+    ports:
+      - "18084:8000"
+    labels:
+      <<: *app-labels
+      service: session-cache
+    networks:
+      - mocknet
+    restart: unless-stopped
+
+  # PagerDuty-shaped mock. Receives the AlertManager webhook, exposes a REST
+  # incident state machine (triggered → acked → resolved). Closes the loop
+  # from "alert fired" to "incident to act on" — the surface the agent's
+  # future MCP tool will consume.
+  incident-tracker:
+    build:
+      <<: *app-build
+      args:
+        SERVICE: incident_tracker
+    image: sre-agent-mock/incident-tracker:latest
+    container_name: mock-incident-tracker
+    environment:
+      SERVICE_NAME: incident-tracker
+      SERVICE_VERSION: v1.0.0
+      LOG_LEVEL: INFO
+    ports:
+      - "18085:8000"
+    labels:
+      <<: *app-labels
+      service: incident-tracker
+    networks:
+      - mocknet
+    restart: unless-stopped
+
   # ─── Metrics: Prometheus + AlertManager ──────────────────────────
   prometheus:
     image: prom/prometheus:v2.53.0

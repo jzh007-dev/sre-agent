@@ -23,8 +23,12 @@ WORKDIR /app
 
 # Deps first (cache-friendly: only reinstalls when requirements.txt changes,
 # not on every code edit).
+# Using Tsinghua PyPI mirror because pypi.org is slow / times out from
+# some networks (e.g. mainland China). Harmless elsewhere — Tsinghua mirrors
+# the same package files.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+    && pip install --no-cache-dir -r requirements.txt
 
 # Shared observability module (imported as `from _shared.observability import ...`)
 COPY _shared ./_shared

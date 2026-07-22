@@ -207,11 +207,23 @@ async def call_downstream(
 
     Records the metric on ANY outcome (success, HTTP error, timeout, conn error).
     Re-raises network errors so the caller decides fallback vs propagate.
+
+    Also honors any active `dependency_fail` fault on this target_service
+    (checked BEFORE the httpx call), simulating "downstream unreachable"
+    without touching the target service.
     """
+    # Lazy import to avoid the fault↔observability circular at module load.
+    from _shared.fault import check_downstream_fault
+
     start = time.perf_counter()
     status_code = "none"
     outcome = "ok"
     try:
+        # dependency_fail fault check: raises ConnectError, falls through to
+        # the ConnectError branch below and gets recorded as outcome=conn_error.
+        _simulated = check_downstream_fault(target_service)
+        if _simulated is not None:
+            raise _simulated
         response = await client.request(method, url, **kwargs)
         status_code = str(response.status_code)
         if 500 <= response.status_code < 600:

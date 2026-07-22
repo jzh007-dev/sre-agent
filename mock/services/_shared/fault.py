@@ -36,8 +36,10 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -49,7 +51,23 @@ _faults: dict[str, dict[str, Any]] = {}
 _EXCLUDED_PREFIXES = ("/metrics", "/health", "/admin")
 
 # Fault types this framework knows how to apply.
-_KNOWN_TYPES = {"latency_ms", "error_rate"}
+#
+# Two families of fault types:
+# - MIDDLEWARE-ACTIVE (checked in fault middleware, may short-circuit):
+#     latency_ms         — sleep before endpoint
+#     error_rate         — return 5xx short-circuit
+#     log_pattern_emit   — emit a log line, request proceeds
+#
+# - SERVICE-CONSUMED (services read state, apply per their own semantics):
+#     memory_pressure    — session-cache reads via get_memory_pressure_state()
+#     dependency_fail    — observability.call_downstream reads via check_downstream_fault()
+_KNOWN_TYPES = {
+    "latency_ms",
+    "error_rate",
+    "log_pattern_emit",
+    "memory_pressure",
+    "dependency_fail",
+}
 
 
 def _endpoint_excluded(endpoint: str) -> bool:
@@ -85,6 +103,20 @@ async def _apply_one(fault: dict[str, Any], endpoint: str) -> JSONResponse | Non
                 "fault_type": ftype,
             },
         )
+    if ftype == "log_pattern_emit":
+        # Emit a log line matching config.pattern; request proceeds unchanged.
+        # Late import to avoid the fault↔observability circular at module load.
+        from _shared.observability import logger
+
+        logger.error(
+            config.get("pattern", "simulated fault event"),
+            extra={
+                "fault_name": fault["name"],
+                **config.get("extra", {}),
+            },
+        )
+        return None
+    # memory_pressure / dependency_fail are service-consumed — no middleware action.
     return None
 
 
@@ -98,6 +130,73 @@ async def maybe_inject_fault(endpoint: str) -> JSONResponse | None:
         response = await _apply_one(fault, endpoint)
         if response is not None:
             return response
+    return None
+
+
+# ── Service-consumed fault APIs (called from service code, not middleware) ─
+#
+# memory_pressure and dependency_fail don't fit "inject at HTTP boundary"
+# semantics — they represent *state* the service must consult and translate
+# into its own failure mode (cache SET failing, downstream call raising
+# ConnectError, etc.). Services call these helpers rather than the middleware.
+
+
+def get_memory_pressure_state() -> dict[str, Any] | None:
+    """Called by services with a memory-shaped failure mode (e.g. session-cache).
+
+    Returns a dict describing current simulated memory state, or None when
+    no memory_pressure fault is configured.
+
+    The memory value linearly ramps from `baseline_bytes` to `target_bytes`
+    over `ramp_seconds` after the fault is set. Once `current_bytes` exceeds
+    `threshold_bytes`, `should_fail=True` — the service should reject writes
+    with `failure_message` in the log (defaults to Redis's canonical
+    bgsave OOM signature).
+    """
+    for fault in list(_faults.values()):
+        if fault["type"] != "memory_pressure":
+            continue
+        config = fault["config"]
+        # Stash ramp-start on the fault dict itself. Module-level state,
+        # cleared when the fault is deleted — good enough for a single-process mock.
+        if "_started_at" not in fault:
+            fault["_started_at"] = time.time()
+        elapsed = time.time() - fault["_started_at"]
+        ramp_seconds = max(config.get("ramp_seconds", 30), 1)
+        baseline = config.get("baseline_bytes", 100_000_000)
+        target = config.get("target_bytes", 500_000_000)
+        threshold = config.get("threshold_bytes", 400_000_000)
+        ratio = min(1.0, elapsed / ramp_seconds)
+        current = int(baseline + ratio * (target - baseline))
+        return {
+            "current_bytes": current,
+            "should_fail": current >= threshold,
+            "failure_message": config.get(
+                "failure_message",
+                "bgsave failed: fork failed: Cannot allocate memory",
+            ),
+        }
+    return None
+
+
+def check_downstream_fault(target_service: str) -> Exception | None:
+    """Called by observability.call_downstream BEFORE the actual httpx call.
+
+    Returns an exception to raise (surfacing as outcome=conn_error in the
+    client-side metric) or None to proceed with the real call. Used to
+    simulate dependency-induced incidents without touching the target
+    service — the caller sees the failure as if the network died."""
+    for fault in list(_faults.values()):
+        if fault["type"] != "dependency_fail":
+            continue
+        config = fault["config"]
+        if config.get("target_service") != target_service:
+            continue
+        if random.random() >= config.get("rate", 1.0):
+            continue
+        return httpx.ConnectError(
+            f"simulated dependency_fail on target_service={target_service}"
+        )
     return None
 
 
