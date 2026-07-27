@@ -7,7 +7,7 @@ The evaluation system is the load-bearing artifact of this project. Without it, 
 ## Guiding principles
 
 1. **Multi-dimensional**: no single number defines "quality." We track accuracy, tool efficiency, cost, latency, and hallucination separately.
-2. **Phase-level**: each phase (triage / collect / hypothesize / verify / report) has its own assertions, so a regression is localized.
+2. **Localized signals**: assertions target specific loop artifacts (which tools got called, what the final report says, verify verdict when a verifier lands) so a regression points at the responsible seam, not at "the agent got worse."
 3. **Judge > exact-match**: an incident report is a text artifact; LLM-as-judge with a rubric beats string matching.
 4. **Regression discipline**: every prompt change or model change runs the full suite before merge.
 5. **Reproducibility**: eval runs are deterministic given `(seed, model_version, prompt_version, golden_set_version)`. All four are logged.

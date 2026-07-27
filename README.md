@@ -43,9 +43,9 @@ Currently in **design phase**. Docs first, code second. Implementation kicks off
 ## Stack (planned)
 
 - **Language**: Python 3.11+
-- **Agent framework**: LangGraph
-- **Workflow durability**: Temporal (single worker, self-hosted or Temporal Cloud free tier)
-- **LLM**: Anthropic Claude (Haiku 4.5 / Sonnet 5 / Opus 4.8, routed by phase)
+- **Agent shape**: `while` loop with LLM-driven tool selection (no orchestration framework — see [TRADEOFFS §22](./TRADEOFFS.md#22-agent-architecture-agent-loop-over-workflow-graph))
+- **Workflow durability**: in-process asyncio (Week 2); Temporal target Week 5-6
+- **LLM**: multi-provider adapter — DeepSeek / Qwen (DashScope) / Moonshot (Kimi) via OpenAI-compat; Anthropic via native SDK
 - **Tool layer**: 2 MCP servers (`observability-mcp`, `deploy-mcp`)
 - **State + memory**: Postgres + pgvector
 - **Cache**: Redis

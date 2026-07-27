@@ -43,7 +43,7 @@ Fill this file as the project evolves. Every checkbox is a piece of interview ev
 
 - [ ] **Termination conditions** enumerated: task complete / max_iterations / cost budget / user cancel
 - [ ] **Loop detection** implemented: 3× same tool + same args → forced reflection
-- [ ] **Per-node tool call budget** enforced — see `ARCHITECTURE.md` §3
+- [ ] **Tool call budget** enforced — global `MAX_TURNS` backstop now; per-tool budgets when observable abuse appears. See `ARCHITECTURE.md` §3
 - [ ] **Per-node cost budget** enforced with degradation path
 - [ ] **Reflection step** after each phase: "is the evidence sufficient?"
 - [ ] Data point ready: "% of runs that hit reflection, % of those that recovered"

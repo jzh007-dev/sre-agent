@@ -55,18 +55,20 @@ Goal: an agent that can accept an alert, walk a `while`-loop of LLM-driven tool 
 
 ## Week 3 — Agent intelligence
 
-Goal: real reasoning per node. Structured outputs. Real prompts. Sonnet reasoning working.
+Goal: real reasoning inside the loop. System prompt tuned. Structured outputs where they help. Parallel tool calls. Adversarial verify path (design TBD).
 
-| L | Concept | Deliverable | Status |
+> **This section is pre-pivot and needs re-planning.** The original Week 3 table below was structured around 5 phase nodes (triage/collect/hypothesize/verify/report). After the Week 2 pivot to a `while` loop (see [TRADEOFFS §22](../TRADEOFFS.md#22-agent-architecture-agent-loop-over-workflow-graph)), several concepts need reshaping: (a) "one prompt per node" collapses into a single system prompt + tool schemas, (b) "model routing by phase" is dropped (no phases) — role-based routing may return if Week 5 eval or Week 3 report generation creates the need, (c) "wrap LangGraph in Temporal" no longer applies — durability is a Week 5-6 concern per [TRADEOFFS §2 revision](../TRADEOFFS.md#2-durable-execution-temporal-not-plain-async). Re-plan this table at the end of Week 2 when the loop has run against a real LLM and we know what real failure modes look like.
+
+| L | Concept (pre-pivot; TO BE RE-PLANNED) | Deliverable (pre-pivot) | Status |
 |---|---|---|---|
 | L1 | Prompt structure: system + phase + retrieved context + scratchpad; XML-tag data isolation (L1 of SECURITY.md defense) | `agent/prompts/*.jinja2` — one per node | `[ ]` |
 | L2 | Structured output via Pydantic; forced schema in Anthropic tool_use; retry on schema fail | `agent/graph/outputs.py`; every node returns typed object | `[ ]` |
 | L3 | Model routing in practice: Haiku for triage, Sonnet for reasoning, Opus for verify; measure cost delta | Config in `llm_gateway.py`, cost logs in Postgres | `[ ]` |
 | L4 | Parallel tool calls in `collect` phase; asyncio.gather across MCP calls; timing wins | `agent/graph/nodes/collect.py` with parallel section | `[ ]` |
 | L5 | Adversarial verify: for each hypothesis, spawn refute sub-agent; verdict schema; kill-on-majority-refute | `agent/graph/nodes/verify.py`; report includes verdicts | `[ ]` |
-| L6 | Temporal workflow: wrap LangGraph run as a workflow; kill-worker test; human signal for approval | `agent/workflow.py`, `docker-compose.yml` add temporal | `[ ]` |
+| L6 | ~~Temporal workflow: wrap LangGraph run as a workflow; kill-worker test; human signal for approval~~ **Removed** — Temporal deferred to Week 5-6 (see [TRADEOFFS §2 revision](../TRADEOFFS.md#2-durable-execution-temporal-not-plain-async)) | — | `[⏭]` |
 
-**Week 3 exit criteria**: 5 hand-authored incidents end-to-end produce plausible root-cause reports; Temporal survives a worker kill mid-verify.
+**Week 3 exit criteria** (pre-pivot; TO BE RE-PLANNED): 5 hand-authored incidents end-to-end produce plausible root-cause reports; Temporal survives a worker kill mid-verify. → Revised target: 5+ golden cases end-to-end with real LLM + real MCP produce plausible root-cause reports (Temporal criterion moves out).
 
 ---
 
