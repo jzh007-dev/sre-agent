@@ -37,19 +37,19 @@ Goal: a docker-compose local stack that produces realistic metrics + logs + can 
 
 ## Week 2 — Agent core skeleton
 
-Goal: an agent that can accept an alert, walk its 5-node LangGraph, and produce a stub report. No intelligence yet — just the plumbing works end-to-end.
+Goal: an agent that can accept an alert, walk a `while`-loop of LLM-driven tool selection, and produce a stub report. No intelligence yet — just the plumbing works end-to-end.
 
-Order reflects the strict "plumbing not intelligence" reading of the week goal: harness skeleton first (defines the shape), then the two seams the harness talks to (LLM gateway + MCP tools), then the ingress that drives it. Every node/tool/gateway is a **stub** returning canned data — real prompts and real queries land in Week 3. See TRADEOFFS §16 (agent-code middleware-agnostic) — Week 2 is where that principle first becomes code.
+**Architectural pivot from original plan** (see [TRADEOFFS §22](../TRADEOFFS.md)): Week 2 was originally scoped as a 5-node LangGraph. Mid-planning we reversed that decision — mainstream agents (Claude Code / Cursor / Devin / OpenAI Assistants) are all `while` + LLM-driven tool-use loops, and SRE root cause analysis is open-ended enough that "which tool to call next" cannot be enumerated in advance. LangGraph's phase graph is the wrong shape; a loop is the right shape. `experiment/langgraph` branch preserves the pre-pivot HEAD for later side-by-side comparison. See TRADEOFFS §20 (agent-code middleware-agnostic) — Week 2 is where that principle first becomes code.
 
 | L | Concept | Deliverable | Status |
 |---|---|---|---|
-| L1 | LangGraph state schema first — harness IS the shape. TypedDict `IncidentState`, 5 nodes as **pass-through stubs** that log their phase and hand `state` along, conditional edges, per-node tool budget enforcement. No LLM, no tool call — just the state-machine skeleton. | `agent/graph/{state.py, graph.py, nodes/*.py}`; `pytest` proves a stub run visits triage → collect → hypothesize → verify → report in order | `[ ]` |
-| L2 | LLM Gateway skeleton (stubbed responses). Model routing by phase label (`triage → haiku`, `collect/hypothesize/report → sonnet`, `verify → opus`), stable-prefix prompt cache markers, Langfuse tracing wired, cost accounting counters. Returns hardcoded strings — real Anthropic calls in Week 3. Chosen before MCP because every phase needs it. | `agent/llm_gateway.py` (~200 lines); test that verifies routing table + Langfuse trace emitted per call | `[ ]` |
-| L3 | MCP protocol basics; stdio transport; tool schema (name, description, params, side_effect, cost_hint); **why 2 servers not 1** (observability read-only vs deploy has WRITE). Three `observability_mcp` tools as **stubs** returning canned JSON. Real PromQL / ClickHouse queries land in Week 3 Lx. | `agent/mcp/observability_mcp/` skeleton with `query_metrics`, `query_logs`, `get_service_topology` all stubbed | `[ ]` |
-| L4 | Temporal workflow wrapping the graph + FastAPI ingress + `alertctl trigger` CLI. `POST /alerts` accepts an alert.json (the shape a real AlertManager webhook produces — matches `eval/golden/GS-*/alert.json`), starts a Temporal workflow, returns 202 with an incident id. Ingress is the surface a real AlertManager webhook (from our mock env) would hit. | `agent/entrypoint.py`, `agent/workflow.py`, `alertctl/` CLI | `[ ]` |
-| L5 | End-to-end smoke: `alertctl trigger --scenario GS-RES-001-redis-oom` sends the case's `alert.json` to the ingress, the workflow starts, the graph walks all 5 stub nodes, tool stubs are called, LLM gateway is called (returning canned data), a stub Markdown report is emitted, Langfuse trace shows every step. **This is the hello-world agent — nothing intelligent, but every seam is real.** | working `alertctl trigger` command; Langfuse trace URL printed; stub report on stdout | `[ ]` |
+| L1 | Agent loop shape: `while` + injectable `LLM` protocol + injectable tool dict; `messages` array **is** state (no separate state class); `stop_reason` drives termination (`end_turn` or `tool_use`); provider-agnostic domain types (`Message` / `TextBlock` / `ToolUseBlock` / `ToolResultBlock` / `Response`) so multi-provider adapters can land in L2. Stub LLM script returns 3 canned turns; 3 stub tools return canned JSON. | `agent/{loop.py, llm/{types,protocol,stub}.py, tools.py}` + `tests/agent/test_loop.py` proving 3-turn stub loop terminates with non-empty report | `[ ]` |
+| L2 | Provider adapter: Anthropic Messages API; content-block shape (text / tool_use); tool_result convention (in `role=user` message); streaming as async iterator of SSE events; Langfuse trace per call. Model choice is single (Sonnet) — model routing dropped from Week 2 because phase concept was dropped with the graph pivot; cost optimization returns in Week 3+ if needed. | `agent/llm/anthropic.py` + test with real Anthropic call against a canned prompt | `[ ]` |
+| L3 | MCP protocol basics; stdio transport; tool schema (name, description, params, side_effect, cost_hint); **why 2 servers not 1** (observability read-only vs deploy has WRITE, deferred to Week 5). Three `observability_mcp` tools as **MCP-transport stubs**: real MCP protocol wiring, canned JSON returns. Real PromQL / ClickHouse queries land in Week 3. | `agent/mcp/observability_mcp/` with `query_metrics`, `query_logs`, `get_service_topology` all stub returns behind real MCP transport | `[ ]` |
+| L4 | FastAPI ingress + `alertctl trigger` CLI. `POST /alerts` accepts an alert.json (shape matches `eval/golden/GS-*/alert.json`), generates `incident_id`, starts a background `run_incident(alert)` task, returns 202 with incident_id. **No Temporal in Week 2** (see [TRADEOFFS §2 revision](../TRADEOFFS.md)) — in-process asyncio task + in-memory incident registry is sufficient for 5-15 min incident windows. Temporal returns Week 5-6 if durability becomes a shipping requirement. | `agent/entrypoint.py`, `alertctl/` CLI | `[ ]` |
+| L5 | End-to-end smoke: `alertctl trigger --scenario GS-RES-001-redis-oom` sends the case's `alert.json` to the ingress, the loop starts, real Anthropic call decides which tools to call, real MCP transport dispatches to stub-return tools, a stub Markdown report emerges, Langfuse trace shows every LLM call + tool call. **This is the hello-world agent — no real reasoning quality yet, but every seam is production-shaped.** | working `alertctl trigger` command; Langfuse trace URL printed; stub report on stdout | `[ ]` |
 
-**Week 2 exit criteria**: `alertctl trigger --scenario GS-RES-001-redis-oom` runs the empty graph, produces a stub report, and a Langfuse trace shows every phase + tool call + LLM call. No real reasoning, no real queries — every capability is a stub. Week 3's job is to fill those stubs with real logic against the same wiring.
+**Week 2 exit criteria**: `alertctl trigger --scenario GS-RES-001-redis-oom` runs the agent loop end-to-end with a real Anthropic call and real MCP transport (stub tool returns), produces a stub Markdown report, and a Langfuse trace shows every LLM call + tool call. No real reasoning quality yet — Week 3's job is to swap stub tool returns for real Prometheus/ClickHouse queries and land tuned prompts.
 
 ---
 
@@ -132,17 +132,18 @@ These aren't in a specific week — bit-by-bit each week:
 
 ## Current pointer
 
-**Session end date**: 2026-07-23  
-**Last completed**: **Week 1 fully done**. Final mock env has 12 real containers; case runner drives 8 runnable golden cases end-to-end.
+**Session end date**: 2026-07-27  
+**Last completed**: **Week 2 architectural pivot** (docs-only commit). Week 1 remains fully done; no code changes this session.
 
-Key milestones from this session:
-- L6 Commit A `d87067c` — AlertManager + fault framework + incident tracker (alert loop closed)
-- L6 Commit B `0695fe6` — session-cache mock + memory_pressure/log_pattern/dependency_fail faults (later partially rolled back in recalibration)
-- L6 Commit `92698cd` — **architectural recalibration**: Python session-cache mock replaced by real `redis:7-alpine` + `oliver006/redis_exporter`; `memory_pressure` fault + `SessionCacheMemoryPressure` alert removed (infra metrics scraped for query, not paged — see [TRADEOFFS.md §17](../TRADEOFFS.md)); case naming shifted to 6 diagnostic patterns (LOAD/CHANGE/DEP/RES/DATA/ENV) — middleware knowledge lives in RAG runbooks, not in cases or agent code (see [TRADEOFFS.md §16](../TRADEOFFS.md))
-- L7 Commit C1 `81ce3cc` — auth-svc using real Redis client; deploy-history mock; case runner; 3-file case structure; GS-P-HTTP-ABORT-001 primitive
-- L7 Commit C2 (this commit) — 3 story cases (RES/DEP/CHANGE) reproducing author's real production experience + 4 more primitive cases adapted from OpenSRE (network-delay, io-latency, dependency-down, crashloop)
+Key events this session:
+- Reviewed Week 2 L1 original plan (LangGraph 5-node state machine) against three concerns raised: (a) LangGraph API churn, (b) SRE incidents don't need checkpoint-recovery, (c) graph topology is overkill for a `while`-shaped agent
+- Reversed the architectural decision: agent shape is now a **`while` loop with LLM-driven tool selection**, matching mainstream agents (Claude Code / Cursor / Devin / OpenAI Assistants) and Anthropic's own "Building Effective Agents" *agent* pattern (as opposed to *workflow*)
+- Downstream decisions dropped or deferred: 5 phase concept, LangGraph runtime dependency, `IncidentState` TypedDict (replaced by `messages` array), model routing (no phases to route by), Temporal (deferred out of Week 2 — see [TRADEOFFS.md §2 revision](../TRADEOFFS.md#2-durable-execution-temporal-not-plain-async))
+- Created `experiment/langgraph` bookmark branch from the pre-pivot HEAD (`603e3d6`) for later side-by-side comparison
+- Week 2 table rewritten: L1 = agent loop skeleton, L2 = Anthropic adapter, L3 = MCP-transport stubs, L4 = FastAPI + alertctl (no Temporal), L5 = E2E smoke
+- New [TRADEOFFS.md §22](../TRADEOFFS.md#22-agent-architecture-agent-loop-over-workflow-graph) documents the pivot; §1 and §2 marked as superseded/revised
 
-**Next up**: Week 2 L1 — **LangGraph state schema + 5 pass-through stub nodes** (harness skeleton). Reordered from the original ROADMAP where MCP was L1: under the "plumbing not intelligence" reading of the week goal, harness comes first because it defines the SHAPE all other Week 2 seams (LLM Gateway, MCP) plug into. See revised Week 2 table above.  
+**Next up**: Week 2 L1 — agent loop skeleton (`agent/{loop.py, llm/{types,protocol,stub}.py, tools.py}` + pytest verifying 3-turn stub loop). All Week 2 seams are still stubs; real Anthropic + real MCP transport come L2/L3, real queries come Week 3.  
 **Blockers**: none  
 
 **Positioning reminder for next sessions** (this is a portfolio project for a mature-company SRE role, not a teaching project):

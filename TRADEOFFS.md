@@ -14,7 +14,9 @@ Format for each entry:
 
 ## 1. Agent paradigm: workflow-skeleton with agentic sub-nodes
 
-- **Decision**: LangGraph 5-node state machine (`triage → collect → hypothesize → verify → report`); each node runs a bounded agent loop.
+> **Superseded by [§22](#22-agent-architecture-agent-loop-over-workflow-graph)** (2026-07-27). Original decision preserved as history; see §22 for the current architecture and why we flipped mid-Week-2-planning. The `experiment/langgraph` branch preserves a pre-pivot HEAD so this decision remains buildable for comparison.
+
+- **Decision** (superseded): LangGraph 5-node state machine (`triage → collect → hypothesize → verify → report`); each node runs a bounded agent loop.
 - **Alternatives**:
   - (A) Pure agentic loop (Claude-Code-style) — one big loop, LLM picks any tool at any time.
   - (B) Pure workflow — every step deterministic, LLM only for text generation.
@@ -23,6 +25,8 @@ Format for each entry:
 - **Reconsider when**: >30% of incidents short-circuit the graph, or eval reveals phase boundaries hurt accuracy.
 
 ## 2. Durable execution: Temporal, not plain async
+
+> **Partial revision (2026-07-27)**: Temporal is deferred out of Week 2. See [§22](#22-agent-architecture-agent-loop-over-workflow-graph) "Related revisions" — with the loop-based agent architecture, messages + JSONL append log gives short-horizon durability for the 5-15 min incident window; Temporal returns Week 5-6 if production-grade durability becomes a shipping requirement. Original decision below is unchanged as the *eventual* target.
 
 - **Decision**: Temporal workflow wrapping the LangGraph run.
 - **Alternatives**:
@@ -244,7 +248,7 @@ Format for each entry:
 - **Cost**: less impressive demo video; harder for a non-technical viewer to "see" the agent.
 - **Reconsider when**: shipping to non-engineering users, or when trace replay UX becomes a differentiator.
 
-## 16. Middleware-specific knowledge lives in RAG, not in agent code or cases
+## 20. Middleware-specific knowledge lives in RAG, not in agent code or cases
 
 - **Decision**: Three strict layers of specificity:
   - **Agent code** — 100% middleware-agnostic. Tools are `query_metrics`, `query_logs`, `get_service_topology`, `list_recent_deploys`. No Redis-specific / Postgres-specific / Kafka-specific branches anywhere in the graph.
@@ -258,7 +262,7 @@ Format for each entry:
 - **Cost**: Loses the immediate legibility of tech-specific case names ("Redis OOM" → "resource exhaustion in a downstream dep"). Users have to learn the six patterns. Also puts more pressure on RAG quality — bad runbooks mean the agent won't know how to interrogate a specific technology.
 - **Reconsider when**: The agent needs to *take actions* on a middleware (not just diagnose) — writing to a Redis cache, restarting a Kafka broker, etc. Actions may warrant vendor-specific tools with proper auth/idempotency semantics.
 
-## 17. Alert on SLO violations only; infra signals are query targets, not pages
+## 21. Alert on SLO violations only; infra signals are query targets, not pages
 
 - **Decision**: Alerting rules fire on **user-facing SLO breaches** (5xx rate, latency, downstream failure rate). Infra metrics (`redis_memory_used_bytes`, `pg_stat_activity_count`, `jvm_gc_pause_seconds`) are scraped, exposed in dashboards, and available for the agent to query — but do **not** page on-call.
 - **Alternatives**:
@@ -267,6 +271,34 @@ Format for each entry:
 - **Why**: At 100+ services with 30% using Redis (a normal mature-org shape), infra-layer alerts cause a page storm on every incident — Redis blips → 30 infra alerts fire → on-call is overwhelmed → real alerts get missed. Google SRE Book Chapter 6 recommends SLO-only alerting for the same reason. The infra signals still matter, but they are the *evidence the agent gathers during RCA*, not the trigger for human wake-up. Alert count should reflect "events requiring immediate human action", not "monitoring points instrumented".
 - **Cost**: Loses the leading-indicator benefit of infra alerts (memory pressure warning *before* users see errors). Compensation: dashboards + prediction models in the observability layer can page pre-emptively when the risk model triggers — but that's a different decision point (risk-based paging) rather than metric-threshold paging.
 - **Reconsider when**: The organization has separate platform vs product on-call rotations *and* platform owns latency SLOs for the middleware layer independently of business services. In that setup, layered alerts route to the right team without contributing to a single-team page storm.
+
+## 22. Agent architecture: agent loop over workflow graph (supersedes §1)
+
+- **Decision**: A single `while` loop where the LLM decides each next action (tool call or final report). No LangGraph, no fixed phase sequence, no orchestration framework beyond the Anthropic client SDK. `messages` array is the state; `stop_reason` drives loop termination.
+- **Alternatives**:
+  - (A) LangGraph 5-node state machine — the original §1 decision.
+  - (B) Hand-written `Orchestrator` class with 5 phase methods — workflow-thinking minus the framework.
+  - (C) Temporal-native — workflow body IS the orchestration; each activity a phase.
+- **Why**:
+  1. **Mainstream shape**: Claude Code, Cursor, Devin, and OpenAI Assistants all use a single tool-use loop. Anthropic's own "Building Effective Agents" post distinguishes *workflows* (deterministic paths, LangGraph territory) from *agents* (LLM-driven, loop territory). SRE root cause analysis is the latter — which tool to call next depends on evidence already gathered, and is not enumerable in advance.
+  2. **Framework churn**: LangGraph 0.0.x → 0.1 → 0.2 → 0.3 have all been breaking; a 6-month upgrade toll on a portfolio project meant to survive is not worth the abstraction it buys us.
+  3. **Double orchestration**: The original plan pairs LangGraph with Temporal. This duplicates state (Temporal workflow vars + LangGraph channels) and retry semantics (Temporal activity retry + LangGraph node retry). Loop pattern collapses this to one layer.
+  4. **Streaming**: `while` naturally `yield`s events per LLM chunk / tool call. LangGraph's `.astream()` schema adds an abstraction layer between us and Anthropic's SSE.
+  5. **State simplicity**: `messages` IS state. No `TypedDict` channel schema, no reducer functions, no `add_conditional_edges` for what is a ~30-line while.
+- **Cost**:
+  - Lose LangGraph's declarative visualization (`get_graph().draw_mermaid()`) — replaced with a hand-drawn diagram in ARCHITECTURE.md.
+  - Lose `interrupt()` primitive for human-in-the-loop — Week 5 L4 gate implements approval via structured `tool_use` + external API instead.
+  - Lose community pattern library (memory savers, checkpointers) — none of them apply to our shape anyway.
+  - "Not using LangGraph" needs to be explained in interviews. This is actually a *signal* if articulated well (candidates who used LangGraph without evaluating it can't; candidates who chose to skip it need to defend the choice, which forces clarity).
+- **Reconsider when**:
+  - Adding ≥3 concurrent independent branches that need to merge state — that is where LangGraph's channel reducers earn their keep.
+  - Tool-use loop primitives in the Anthropic SDK become inadequate (e.g., no way to express the branching we need).
+  - Building a *workflow* product (deterministic steps with LLM-in-the-middle), not an *agent*.
+
+**Related revisions**:
+- **§1** (workflow-skeleton with agentic sub-nodes): **superseded**. Original entry preserved as history at the top of this file. `experiment/langgraph` branch preserves the pre-pivot HEAD.
+- **§2** (Temporal for durable execution): **partial revision** — Temporal deferred out of Week 2. With loop-based agent, `messages` + JSONL append log provides sufficient short-horizon durability for the 5-15 min incident window; process death within that window is a manageable risk. Temporal returns Week 5-6 if production-grade durability becomes a shipping requirement.
+- **Phase concept** (`triage → collect → hypothesize → verify → report`): dropped. Mature agent architecture is LLM-driven ordering; phases were workflow-thinking residue. Model routing (§5) is affected — no phases to route by; Week 2 uses single-model (Sonnet); cost optimization returns Week 3+ if measurement justifies it.
 
 ---
 

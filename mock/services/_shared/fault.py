@@ -57,7 +57,7 @@ _EXCLUDED_PREFIXES = ("/metrics", "/health", "/admin")
 # (redis-cli CONFIG SET, psql, kafka-configs.sh, ...). Rationale: match the
 # real production shape where infra faults produce real vendor-authored
 # signals (real metric names, real log lines) rather than our synthesized
-# approximations. See TRADEOFFS.md §16.
+# approximations. See TRADEOFFS.md §20.
 #
 # Two families of fault types on app services:
 # - MIDDLEWARE-ACTIVE (checked in fault middleware, may short-circuit):
