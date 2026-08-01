@@ -1,5 +1,9 @@
 # Incident Walkthrough
 
+> ⚠️ **This document is pre-pivot and describes an architecture that no longer exists.** It narrates the incident through five phase nodes (`triage → collect → hypothesize → verify → report`), which were dropped in the Week 2 architectural pivot — see [TRADEOFFS §22](./TRADEOFFS.md#22-agent-architecture-agent-loop-over-workflow-graph) and [§23](./TRADEOFFS.md#23-harness-deterministic-pipeline-around-the-agent-loop-refines-22). The current shape is a six-step deterministic harness containing a ReAct loop; there are no phases and no per-node prompts.
+>
+> It is kept as-is rather than half-corrected, because the *narrative shape* (one incident, timestamped, every subsystem touched, real numbers) is the part worth preserving. The rewrite is scheduled for **Week 7** and will trace a real `GS-*` case with real measured numbers instead of illustrative ones. Until then, read this for the storytelling structure, not for the architecture.
+
 A single fictional incident traced end-to-end through every subsystem — the concrete narrative that makes "how does your diagnostic flow actually work" answerable in one story.
 
 Scenario is loosely inspired by public postmortems (Cloudflare 2022 workers-KV, Datadog 2023 multi-day outage): a config change silently reduces DB connection pool size, causing gradual saturation until 5xx spikes trip an alert. Numbers below are for illustration; real fixture data lives in `eval/golden/GS-014-*/`.

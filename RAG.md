@@ -1,6 +1,8 @@
 # Runbook RAG Subsystem
 
-A retrieval subsystem for SRE runbooks and postmortems. **Not** the agent's episodic memory (that's past-incident recall in pgvector) — this is the **knowledge base** the `collect` and `hypothesize` phases search to find applicable playbooks.
+A retrieval subsystem for SRE runbooks and postmortems. **Not** the agent's episodic memory (that's past-investigation recall in pgvector) — this is the **knowledge base** the agent searches via the `search_runbook` tool when it wants an applicable playbook.
+
+**Namespaced per integration.** Every chunk carries the `runbook_namespace` declared in its integration's YAML, and retrieval filters on it. This is the mechanism behind [TRADEOFFS §20](./TRADEOFFS.md#20-middleware-specific-knowledge-lives-in-rag-not-in-agent-code-or-cases): middleware-specific operational knowledge lives here as *content*, never in the agent code and never in the system prompt. Adding Kafka to the fleet means adding a namespace of runbook chunks — not a prompt edit, not a code change.
 
 > Same Tier 1.5 philosophy: smallest system that works; every sophisticated feature listed with a **trigger condition** for when it becomes worth adding.
 
@@ -41,11 +43,12 @@ At this scale, a lot of RAG "best practices" are overkill. The design below is i
                     ▼
    ┌────────────────────────────────┐
    │ Retrieval                      │
+   │  namespace filter (integration)│
    │  dense (pgvector) + BM25 (tsv) │
    │  simple weighted sum → top-5   │
    └────────────────┬───────────────┘
                     ▼
-   collect / hypothesize node
+   search_runbook tool → agent loop
 ```
 
 ### Chunking
@@ -81,8 +84,9 @@ Delete-old + insert-new is transactional per doc, so concurrent readers never se
 ### Handling misses
 
 - Reranker's absent, so we use a **dense-score threshold** (`cos_sim > 0.55`) as the "did we find anything" signal.
-- If top-1 below threshold: `collect` node is told "no matching runbook"; agent falls back to first-principles reasoning.
+- If top-1 below threshold: the tool returns "no matching runbook" and the agent falls back to first-principles reasoning.
 - These "no-hit" events are logged; weekly report surfaces topics that need runbook coverage.
+- **Feedback loop (Week 4)**: on a no-hit case that the agent nonetheless diagnoses, it proposes a draft runbook chunk in its report. Otherwise the no-hit log is a list nobody consumes. See [ROADMAP open gap #6](./docs/ROADMAP.md#open-gaps).
 
 ### Metrics tracked
 
@@ -161,7 +165,7 @@ Each feature below is **not built** but **thought through**. If a specific signa
 ### Full Agentic RAG at retrieval layer
 
 - **What it is**: retrieval agent decomposes complex query → sub-queries → per-sub-query retrieve → synthesize.
-- **Our position**: the *outer* system is already agentic; `hypothesize` node generates multiple hypotheses, each becomes a retrieval query. That's agentic-RAG behavior at the agent level. Keeping the *retrieval* subsystem procedural makes it cacheable and testable.
+- **Our position**: the *outer* system is already agentic — the ReAct loop decides when to call `search_runbook`, with what query, and whether to call it again after seeing the result. That is agentic-RAG behavior at the agent level, and it comes free from the loop. Keeping the *retrieval* subsystem procedural makes it cacheable and testable.
 - **Add when**: retrieval starts needing planning (queries with multiple entities that must be resolved separately).
 
 ### Multimodal RAG

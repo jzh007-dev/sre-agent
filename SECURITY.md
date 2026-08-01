@@ -130,9 +130,9 @@ User (trusted framing):
 
 **Goal**: eliminate free-form output that could carry injected instructions to downstream systems (humans, tools).
 
-**Mechanism**: every LLM node returns typed Pydantic / JSON Schema output. No free-text-with-tool-calls allowed.
+**Mechanism**: the report is delivered as a **forced tool call** (`submit_report`) with a Pydantic-validated schema, not as free assistant text. This is also how the loop terminates (see [ARCHITECTURE §4](./ARCHITECTURE.md#4-agent-loop-react-kernel)) — so "structured output" is not a discipline the agent could skip; it is the only exit from the loop.
 
-Example schema at `hypothesize` node:
+Example schema on the WRITE-action portion of `submit_report`:
 
 ```python
 class ProposedAction(BaseModel):
@@ -147,10 +147,17 @@ class ProposedAction(BaseModel):
             raise ValueError(f"Unknown service: {v}")
         return v
 
-class HypothesisOutput(BaseModel):
-    hypotheses: list[Hypothesis] = Field(..., min_items=1, max_items=4)
+class Report(BaseModel):                       # the submit_report payload
+    root_cause: str = Field(..., max_length=1000)
+    confidence: Literal["high", "medium", "low", "unknown"]
+    evidence: list[str] = Field(..., max_items=20)
+    ruled_out: list[str] = Field(default_factory=list, max_items=10)
+    open_questions: list[str] = Field(default_factory=list, max_items=5)
+    assumptions: list[str] = Field(default_factory=list, max_items=5)
     proposed_actions: list[ProposedAction] = Field(..., max_items=3)
 ```
+
+`confidence="unknown"` is a **legal** value — "I narrowed it to two services but cannot confirm which" is a valid and useful report, and forcing a confident answer is itself a safety problem. The gate (Layer 4) grades on this field.
 
 **Effect on attacks**:
 - "Rollback all services" → `target_service="all"` fails enum → LLM must retry with a real service name → attacker's amplification goal fails.
@@ -162,10 +169,10 @@ class HypothesisOutput(BaseModel):
 
 **Goal**: catch semantic-level injection that survived Layer 1+2.
 
-**Mechanism**: after `hypothesize`, before `verify`, a separate LLM call reviews the proposed actions with a security-focused rubric.
+**Mechanism**: harness step ⑤ — after `submit_report` validates, before step ⑥ fans the report out — a separate LLM call reviews the proposed actions with a security-focused rubric. Placing it in the harness rather than inside the loop means the agent cannot decline to be reviewed.
 
 Design details:
-- **Different model family than primary**. If primary is Claude Sonnet, reviewer is GPT-4.x-mini or a local Llama variant. Family diversity defeats family-specific injection payloads.
+- **Different model family than primary**, routed by the gateway. This requirement is *why* the project ships two adapter families at all — see [TRADEOFFS §5 revision](./TRADEOFFS.md#5-model-routing-3-tier-haiku--sonnet--opus). Family diversity defeats family-specific injection payloads.
 - **Reviewer sees only**: the proposed actions + a minimal summary. It does NOT see the raw untrusted data (avoid re-exposure).
 - **Rubric prompt**:
 

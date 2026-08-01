@@ -26,7 +26,7 @@ Format for each entry:
 
 ## 2. Durable execution: Temporal, not plain async
 
-> **Partial revision (2026-07-27)**: Temporal is deferred out of Week 2. See [§22](#22-agent-architecture-agent-loop-over-workflow-graph) "Related revisions" — with the loop-based agent architecture, messages + JSONL append log gives short-horizon durability for the 5-15 min incident window; Temporal returns Week 5-6 if production-grade durability becomes a shipping requirement. Original decision below is unchanged as the *eventual* target.
+> **Partial revision (2026-07-27)**: Temporal is deferred out of Week 2. See [§22](#22-agent-architecture-agent-loop-over-workflow-graph) "Related revisions" — with the loop-based agent architecture, messages + JSONL append log gives short-horizon durability for the 5-15 min incident window; Temporal returns Week 6-7 if production-grade durability becomes a shipping requirement. Original decision below is unchanged as the *eventual* target.
 
 - **Decision**: Temporal workflow wrapping the LangGraph run.
 - **Alternatives**:
@@ -37,6 +37,15 @@ Format for each entry:
 - **Reconsider when**: p99 incident duration falls under 60s (then plain async is fine).
 
 ## 3. LLM Gateway: in-process wrapper, not LiteLLM/Portkey service
+
+> **Reaffirmed and scoped (2026-08-01)**. During the Week 2 pivot this module was renamed "LLM adapter layer" in [ARCHITECTURE.md](./ARCHITECTURE.md), and four of its five responsibilities were dropped behind the phrase *"SDK-native."* That phrase is true only for **retry and rate-limit backoff**. The SDK does not decide where `cache_control` breakpoints go, does not accumulate per-investigation cost, does not enforce a budget ceiling, and does not cache responses. Two documents depend on the parts that were dropped: [EVAL.md](./EVAL.md) names the gateway as the sole source of `cost_usd`, and gateway-level response caching is the only mechanism that makes EVAL.md's reproducibility principle (`deterministic given (seed, model_version, prompt_version, golden_set_version)`) physically achievable — LLM calls are otherwise non-deterministic. The gateway is restored as a first-class component in Week 2 L3, owning six responsibilities:
+>
+> 1. **Routing** by task nature (main loop / refute / judge) — see [§5 revision](#5-model-routing-3-tier-haiku--sonnet--opus).
+> 2. **`cache_control` breakpoint placement** over the layered system prompt. Placed correctly this saves 60-70% of input tokens; placed wrongly it saves nothing. Pure code decision, unrelated to model quality.
+> 3. **Cost accounting** — per-call → per-investigation accumulation, persisted.
+> 4. **Budget enforcement** — a hard per-investigation ceiling that *refuses* the call so the harness can degrade gracefully. This is what turns `p99 incident cost < $0.40` from an aspiration into a mechanism.
+> 5. **Response cache** keyed `(model, prompt_hash)` — makes nightly eval affordable *and* reproducible.
+> 6. **Tracing** — Langfuse, tagged with `prompt_version` / `model_version` per [EVAL.md](./EVAL.md).
 
 - **Decision**: hand-written `llm_gateway.py` — model routing, prompt cache mgmt, retry, cost accounting, Langfuse tracing.
 - **Alternatives**:
@@ -58,6 +67,19 @@ Format for each entry:
 - **Reconsider when**: profiling shows tool-boundary latency dominates end-to-end (won't happen at our scale, but noting for completeness).
 
 ## 5. Model routing: 3-tier (Haiku → Sonnet → Opus)
+
+> **Revised (2026-08-01) — the routing key changed from *phase* to *task nature*, and the justification changed from *cost* to *requirement*.**
+>
+> Phases died with the graph pivot ([§22](#22-agent-architecture-agent-loop-over-workflow-graph)), which left routing with nothing to key on. It returns keyed on the nature of the call, which is a better predictor of required capability than position in a pipeline ever was:
+>
+> | Call | Tier | Why |
+> |---|---|---|
+> | Main ReAct loop | workhorse (primary provider) | carries all prompt tuning and the eval baseline |
+> | Refute sub-loop | strongest | adversarial reasoning is where hallucinations get caught |
+> | LLM judge / L3 reviewer | **different family, mandatory** | [EVAL.md](./EVAL.md) requires the judge to differ from the agent; [SECURITY.md](./SECURITY.md) L3 requires a different-family reviewer |
+> | Alert noise classification | **deferred — rules first** | a cheap-model classifier is premature until measurement shows fingerprint + vector similarity is insufficient |
+>
+> **The cost argument is retired as the primary justification.** At an estimated $5-15/month, "Haiku is 10× cheaper" does not justify the burden of N prompt tunings and an N-way eval matrix. What *does* justify multi-model is that security and evaluation both **require** model diversity by design. Multi-provider therefore ships as a **seam, not a feature**: one primary provider carries all tuning; a second family exists to satisfy the judge/reviewer requirement; quality parity across providers is explicitly **not** promised. `OpenAICompatLLM` covers DeepSeek / Qwen / Kimi through `base_url` alone, so "multi-provider" costs two adapter classes and one catalog table — not a multi-LLM project.
 
 - **Decision**: Haiku 4.5 for triage (extract entities, prefetch memory); Sonnet 5 for collect/hypothesize/report; Opus 4.8 for verify only.
 - **Alternatives**:
@@ -297,8 +319,148 @@ Format for each entry:
 
 **Related revisions**:
 - **§1** (workflow-skeleton with agentic sub-nodes): **superseded**. Original entry preserved as history at the top of this file. `experiment/langgraph` branch preserves the pre-pivot HEAD.
-- **§2** (Temporal for durable execution): **partial revision** — Temporal deferred out of Week 2. With loop-based agent, `messages` + JSONL append log provides sufficient short-horizon durability for the 5-15 min incident window; process death within that window is a manageable risk. Temporal returns Week 5-6 if production-grade durability becomes a shipping requirement.
+- **§2** (Temporal for durable execution): **partial revision** — Temporal deferred out of Week 2. With loop-based agent, `messages` + JSONL append log provides sufficient short-horizon durability for the 5-15 min incident window; process death within that window is a manageable risk. Temporal returns Week 6-7 if production-grade durability becomes a shipping requirement.
 - **Phase concept** (`triage → collect → hypothesize → verify → report`): dropped. Mature agent architecture is LLM-driven ordering; phases were workflow-thinking residue. Model routing (§5) is affected — no phases to route by; Week 2 uses single-model (Sonnet); cost optimization returns Week 3+ if measurement justifies it.
+
+---
+
+## 23. Harness: deterministic pipeline around the agent loop (refines §22)
+
+- **Decision**: the system is a **linear pipeline containing a ReAct loop**. Six steps, fixed order, plain Python: `① route → ② preprocess → ③ loadout → ④ loop → ⑤ parse → ⑥ fanout`. Only step ④ is non-deterministic. Steps ①②⑥ vary by trigger type; ③④⑤ are identical across alert / chat / patrol.
+- **Alternatives**:
+  - (A) Pure loop — the alert goes straight into the loop and the LLM does everything, including dedup and notification, via tools.
+  - (B) Steps ①-③ as tools the LLM calls.
+  - (C) Back to a graph, with ④ as one node among six.
+- **Why**:
+  1. **§22 was half an answer.** It correctly argued that root cause analysis is agent-shaped, then implied the *whole system* is a bare loop. It isn't. Deduplication, severity mapping, tool loadout, and notification routing are all enumerable in advance — which is the exact definition of workflow territory in Anthropic's taxonomy. The correct description is *a workflow containing an agent*, which is also the standard production shape.
+  2. **An LLM doing dedup is worse and more expensive** than a Redis key lookup. Handing a deterministic task to a model costs money and loses auditability.
+  3. **The shell is where the cage is built.** The LLM decides *what to query next*; the code decides *what it may query, for how long, over which time window, in what output shape, and who receives the result*. Freedom of ordering without freedom over resources or contracts.
+  4. **Testability.** ①②③⑤⑥ are ordinary functions — unit-testable, breakpoint-able, runnable without an LLM. Under (A) or (C) every one of those becomes an LLM call or a graph node.
+- **Shape, precisely**: the shell is a *linear pipeline*, not a DAG. It is technically a degenerate DAG (a single chain), but calling it a DAG misleads — a DAG's value is expressing branches and joins, and there are none. The only real fan-out/fan-in is patrol's outer `asyncio.gather` over N investigations. The kernel is **structured ReAct**: Thought is an optional assistant text block, Action is a `tool_use` block, Observation is a `tool_result` block — the same idea as the 2022 ReAct paper, but with the API guaranteeing structure instead of a prompt convention being parsed. Plus recursive sub-agents (the refute loop). Full description: **linear pipeline shell + ReAct kernel + recursive sub-agents.**
+- **Cost**: two places to look when debugging. Harness steps cannot adapt to evidence, by construction.
+- **Reconsider when**: a shell step starts needing evidence from tool calls to decide what to do — that step belongs inside the loop, not in the shell.
+
+## 24. Integrations are configuration, not code
+
+- **Decision**: an integration is a **YAML file plus an MCP server**. Zero Python per integration. The file declares `match` rules, the `mcp` server command, `runbook_namespace`, `prompt_fragment`, `notifier` list, and a declarative `inbound_mapping` (jsonpath field mapping).
+- **Alternatives**:
+  - (A) An `Integration` Python Protocol with ~5 methods per integration (the first proposal).
+  - (B) One flat tool registry — every tool always available to every incident.
+  - (C) `if/elif` on alert source inside the harness.
+  - (D) A separate agent deployment per integration.
+- **Why**:
+  - (B) breaks around 30 tools: schema bloat inflates every request, and tool-selection accuracy degrades. It also leaks a `jira` tool into a Kafka incident, where it is noise. A per-integration bundle keeps the schema list at roughly 6-10 tools per investigation.
+  - (C) is the pattern that always rots.
+  - (A) works but makes every integration a code review. Config makes the abstraction cost **zero lines of Python**, which is a far stronger claim and a directly measurable one (Week 5 L7).
+  - This is [§20](#20-middleware-specific-knowledge-lives-in-rag-not-in-agent-code-or-cases) finally becoming code rather than a documented intention.
+- **Cost**: inbound webhook normalization resists pure config, because every vendor's payload shape differs. Declarative jsonpath mapping covers the common flat-JSON webhook; an optional Python normalizer is the escape hatch for genuinely malformed sources. An investigation needing tools from two integrations requires an explicit compose step.
+- **Reconsider when**: tools per integration exceeds ~10 (then intra-bundle selection or tool search is needed), or when a third integration needs the Python escape hatch (that's the signal the mapping DSL is too weak).
+
+## 25. Trigger registry: alert is one entry mode of three
+
+- **Decision**: a trigger registry with per-trigger pre-processors plugging into harness step ②. Three modes: `alert` (webhook, real), `chat` (interactive, stub in Week 2), `patrol` (scheduled, stub in Week 2). All three normalize to the same `Investigation`; the central noun is *investigation*, not *incident*.
+- **Alternatives**:
+  - (A) Alert-only now, generalize later.
+  - (B) Three separate applications sharing a library.
+- **Why**: (A) is the tempting one and it is a trap, because two consequences of chat and patrol are cheap now and invasive later:
+  - **Chat requires multi-turn**, so `messages` must belong to a persistable `Investigation` rather than being a local variable discarded at loop exit. The same seam gives JSONL durability and a future Temporal resume for free.
+  - **Chat requires streaming**, so the loop must yield events rather than return a string. [ARCHITECTURE.md](./ARCHITECTURE.md) already claims "`while` naturally yields events" as an advantage of loop over graph — an advantage the current string-returning code does not actually deliver.
+  - **Patrol requires per-investigation budgets**, because it fans out over N targets that each need independent accounting and independent degradation.
+  - Human-in-the-loop (see [§27](#27-human-in-the-loop-non-blocking-by-default)) also lands on this same seam at zero extra cost.
+- **Cost**: `Investigation` is a real abstraction where `alert: dict` was free. Two stub triggers exist in Week 2 that do nothing useful.
+- **Reconsider when**: nothing foreseeable. If chat and patrol were cancelled the abstraction would still be earned by durability and HITL alone.
+
+## 26. k8s integration: a config-only seam, no k3d cluster
+
+> **Reversed 2026-08-01, days after being decided.** The original entry (a k3d sidecar cluster with 2-3 deliberately broken pods) is below for the record. A capacity review put every proposed addition against a mandatory cut list, and k3d was the only item that was simultaneously expensive and weak as evidence.
+
+- **Decision**: k8s is registered as a **configuration-only integration** — a YAML file with `match` rules and a declared MCP server, and no running cluster. The claim the integration layer needs to substantiate ("adding an integration costs zero lines of Python") is proven instead by a second *live* config-only integration on one container, not by a second infrastructure plane.
+- **Alternatives**:
+  - (A) k3d single-node sidecar cluster with broken pods — the previous decision.
+  - (B) Migrate the 7 mock microservices onto k3d.
+  - (C) Mock a kube-apiserver in FastAPI.
+- **Why**:
+  1. **The evidence per day is poor.** Three deliberately-broken pods do not demonstrate operating Kubernetes. An interviewer who cares about k8s will get past that in two questions; the same days spent on distributed-trace attribution, a written diagnostic methodology, and a deterministic precompute layer hold up much longer.
+  2. **It buys the budget for the P0 items.** Traces ([§29](#29-trace-scope-per-request-causal-chains-not-a-third-pillar)), the methodology document, and the precompute layer ([§28](#28-precompute-produces-a-shortlist-never-a-conclusion)) total roughly the same number of days. Something had to pay for them, and every other candidate cut cost more evidence than this one.
+  3. **The abstraction claim does not need k8s.** It needs a *second integration added without touching Python*, and any real backend serves — a Kafka broker is one container against k3d's whole control plane.
+- **Cost**: no k8s-shaped signals in the golden set, so pod-lifecycle failure modes (OOMKilled, ImagePullBackOff, crashloop-with-no-deploy) go untested. Note that `GS-P-CRASHLOOP-001` already covers container restart at the docker level, which is the same *diagnostic pattern* under a different middleware — which is precisely the [§20](#20-middleware-specific-knowledge-lives-in-rag-not-in-agent-code-or-cases) thesis.
+- **Reconsider when** — and this is unusually cheap to reverse, which is the payoff of [§24](#24-integrations-are-configuration-not-code):
+  - the reversal is one `config/integrations/k8s.yaml`, one `mcp_servers/k8s/server.py`, and a k3d compose file. **Zero changes to `agent/core/`.** The expensive part is authoring golden cases for it, not the wiring.
+  - flip it if: a target role's interview loop centres on Kubernetes; or eval shows the agent failing a class of failure that only pod-lifecycle signals explain; or the project extends past 7 weeks and the marginal day is cheap again.
+
+<details>
+<summary>Original decision (superseded the same week)</summary>
+
+- **Decision**: keep Week 1's docker-compose untouched; add a k3d single-node cluster alongside it containing 2-3 deliberately broken pods, with `kube-state-metrics` scraped by the existing Prometheus.
+- **Why**: migrating the mock fleet onto k3d would rewrite Week 1's fault injection and `case_runner.py` for zero diagnostic gain; the integration needs k8s-shaped signals, not microservices happening to run under k8s. Mocking a kube-apiserver would violate the real-components principle.
+- **Cost**: two planes to stage; `case_runner.py` grows a second setup path.
+
+</details>
+
+## 27b. Golden set target: 30 cases, not 55
+
+- **Decision**: ~30 cases — 20 ordinary (spread across easy / medium / hard / pathological) plus 10 adversarial.
+- **Why**: the 10 adversarial cases are load-bearing because [EVAL.md](./EVAL.md)'s per-layer bypass rate needs roughly two per defence layer; they stay. The ordinary count was set at 45 before anyone had authored one against real fault injection, and authoring against a real stack costs several times what writing a fixture costs. Twenty is enough for a per-difficulty breakdown and for regression detection, which is what the set is *for*.
+- **Cost**: weaker statistics per difficulty bucket — a single case flipping moves a bucket mean noticeably. Reported as a caveat rather than hidden.
+- **Reconsider when**: bucket variance makes a regression signal unreadable, which is a measurable condition, not a guess.
+
+## 27. Human-in-the-loop: non-blocking by default
+
+- **Decision**: asking a human is a **tool** (`ask_human`), not a special loop state. Default semantics are **non-blocking**: the agent records the open question in its report and continues under an explicitly stated assumption. Blocking happens in exactly two cases — chat mode (a human is present by definition) and WRITE-tool approval (blocking *is* the point, see [SECURITY.md](./SECURITY.md) L4).
+- **Alternatives**:
+  - (A) Always block on clarification, as coding agents do.
+  - (B) Never ask; force the model to guess silently.
+- **Why**: **at 3am nobody answers.** An alert-triggered investigation that blocks indefinitely on a human produces nothing, which is strictly worse than a report that says *"I need to know X; assuming X=A, the conclusion is Y."* This is the single biggest behavioral difference from a coding agent, where the human is always present. The output framing is also more useful operationally: a report carrying explicit open questions hands off across a shift; a suspended investigation does not.
+- **Implementation consequence**: **zero loop changes.** It is a tool whose result arrives from a different source depending on trigger — the next user message in chat, a Slack thread reply with a timeout in alert mode, never in patrol. This works only because `Investigation` is persistable and the loop yields events ([§25](#25-trigger-registry-alert-is-one-entry-mode-of-three)), which is independent confirmation that the Week 2 L2 refactor is correctly scoped.
+- **Cost**: the report schema needs `open_questions` and `assumptions` fields, and eval needs a metric for whether stated assumptions were reasonable. A non-blocking agent can also proceed confidently down a wrong assumption — which is what the refute sub-loop exists to catch.
+- **Reconsider when**: a WRITE tool exists whose blast radius makes "proceed under assumption" unacceptable even for reads. That's a gate policy question, not a loop question.
+
+## 28. Precompute produces a shortlist, never a conclusion
+
+- **Decision**: the harness computes a set of deterministic facts before the model is invoked — a merged timeline (alert firing, metric onset, log-error onset, deploys in window), a topology graph derived from existing client-side downstream metrics, the blast radius, and a **ranked shortlist of candidate root-cause services**. The model receives the shortlist and the timeline; it does not receive a proposed answer, and it is free to reject the ranking.
+- **Alternatives**:
+  - (A) No precompute — the model discovers topology and timelines through tool calls.
+  - (B) Precompute a conclusion and have the model write it up.
+- **Why (A) fails**: a real agentic RCA loop with no precomputation runs 30-100 tool calls, because the model rediscovers the service graph and the change timeline from scratch every incident. Those are deterministic joins over data we already have. Leaving them to the model is the reason unassisted agentic RCA does not scale, and it is also why this project's original "median tool calls < 12" target was fiction — see [§30](#30-unmeasured-targets-are-labelled-hypotheses).
+- **Why (B) is the actual danger**: if the ranking is good enough, the model becomes an expensive narrator for a heuristic, and **accuracy metrics will look excellent while the LLM contributes nothing**. This failure is invisible to every metric in EVAL.md as originally written. Two guards:
+  1. **`precompute_override_rate`** — the fraction of investigations whose final root cause is *not* the top-ranked candidate. Near zero means we built a ranking algorithm with a commentary track, and the honest response is to say so.
+  2. The golden set must contain cases where the correct answer is **not** the top candidate. `GS-LOAD-001` is one by construction — the loudest signal is a 10x traffic rise and the real cause is a retry misconfiguration — which is a second reason to pull it out of `eval/backlog/`.
+- **Cost**: a new deterministic component to maintain and test; a precompute bug now looks like a reasoning failure until you check the shortlist. Mitigated by logging the shortlist into the trace so the two are separable.
+- **Reconsider when**: `precompute_override_rate` stays above ~40%, which would mean the ranking is noise and the model is doing the work anyway — then simplify to timeline plus topology and drop the scoring.
+- **Consistent with [§23](#23-harness-deterministic-pipeline-around-the-agent-loop-refines-22)**: enumerable work belongs in the shell. A topology join is enumerable. "Which of these three candidates actually explains the log lines" is not.
+
+## 29. Trace scope: per-request causal chains, not "a third pillar"
+
+- **Decision**: add OTel tracing and a Tempo backend, expose one tool — `query_traces` — that returns **edge-level aggregates and, on explicit `trace_id` drill-down, a single request's span tree**. Never raw span dumps. Scoped initially to the latency and cascade cases, and kept only if it earns its keep by a measured margin.
+- **Alternatives**:
+  - (A) No traces (the Week 1 position).
+  - (B) Full trace pillar with span-level querying available generally.
+- **Why the framing matters**: the tempting argument is "the mock has metrics and logs, so a third of observability is missing." That overstates it. Week 1 L5 already emits client-side `downstream_requests_total{service,downstream,outcome}`, so **per-edge RED is already available from Prometheus** and the topology graph can be derived from it without any tracing backend. What traces genuinely add is narrower and real: *where the time went inside one slow request*, and edges nobody declared.
+- **Why (B) fails**: a span dump is the single fastest way to destroy a context window, and an agent that pages through spans burns its budget on data it cannot summarise. Aggregates plus targeted drill-down is the only shape that fits inside a token budget.
+- **Acceptance number** — this decision is falsifiable rather than assumed: accuracy delta on `GS-P-NETWORK-DELAY-001`, `GS-P-IO-LATENCY-001`, and `GS-P-DEPENDENCY-DOWN-001` with `query_traces` available versus withheld. Following [RAG.md](./RAG.md)'s own rule that an ablation row showing under 2% gain does not ship: **if the delta is negligible, we report that edge-level metrics were sufficient and remove the tool.** A negative result here is a finding, not a failure.
+- **Cost**: OTel instrumentation across 7 services plus a Tempo container; one more thing that can be down during an incident (which the partial-observability work in W3 L8 then has to handle, so it is not purely cost).
+- **Reconsider when**: covered by the acceptance number above.
+
+## 30. Unmeasured targets are labelled hypotheses
+
+- **Decision**: any number in the docs that has not been measured is written as a **hypothesis with the lesson that will test it**, not as a target. Specifically `median tool calls < 12`, `p99 cost < $0.40`, and `median investigation 60-90s` were all authored before a single loop had run.
+- **Why**: the project's stated acceptance rule is "every component ships with a number." A target invented in advance and then quietly met by adjusting the target is the exact failure that rule exists to prevent. If the real figure is 40 tool calls, the honest move is to publish 40, explain why, and let the precompute layer ([§28](#28-precompute-produces-a-shortlist-never-a-conclusion)) attack it — not to relabel 40 as acceptable.
+- **Cost**: the docs read less confidently. That is the correct amount of confidence for an unmeasured quantity.
+- **Reconsider when**: never — this is a documentation discipline, not a design choice.
+
+## 31. Patrol stays a stub until its value proposition is settled
+
+- **Decision**: the `patrol` trigger keeps its seam and its stub; no real implementation until there is an answer to "what does patrol find that alerting does not?"
+- **Why**: a scheduled run of the diagnostic loop is just slower alerting. The differentiator would be finding what never crosses a threshold — slow degradation, config drift, capacity trend — and that implies *different tools* (trend, diff-over-time) and a *different output shape* (a digest, not a root-cause report). Building the trigger before settling that produces a feature that duplicates alerting.
+- **What the stub still buys**: it forced `Investigation` to carry a per-investigation budget and forced the loop to yield events, both of which landed in W2 L2 and are load-bearing for chat too. The seam earned its keep before the implementation existed.
+- **Reconsider when**: the question above has a written answer with at least one golden case that alerting provably cannot catch.
+
+## 32. Temporal is out of scope, not deferred
+
+- **Decision**: Temporal leaves the plan. Per-investigation JSONL append logs are the Tier 1.5 durability answer, and Temporal is documented as a Tier 2 seam with a migration story.
+- **Why**: it has been "deferred one more phase" three times (W2 → W5-6 → W6-7), which is how scope pretends to be planned. The honest position: for a 5-15 minute investigation window, a replayable append log is adequate, and `Investigation` owning `messages` ([§25](#25-trigger-registry-alert-is-one-entry-mode-of-three)) is what keeps the migration mechanical if it is ever needed.
+- **Cost**: no crash-resume demo, and no signal-based human approval primitive — so W6's gate uses a structured tool call plus an external API instead, as [§22](#22-agent-architecture-agent-loop-over-workflow-graph) already anticipated.
+- **Reconsider when**: p99 investigation duration exceeds ~30 minutes, or a human approval step needs to survive a process restart.
 
 ---
 

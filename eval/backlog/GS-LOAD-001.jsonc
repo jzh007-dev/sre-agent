@@ -1,3 +1,33 @@
+// ============================================================================
+// BACKLOG — not runnable yet. Moved out of eval/golden/ on 2026-08-01 because
+// it is in the pre-Week-1 single-file fixture format, while every runnable case
+// is a 3-file directory (alert.json + setup.yaml + expected.yaml) driven by real
+// fault injection. See EVAL.md "Golden set".
+//
+// It is kept because the *case design* is the most valuable in the set — it is
+// the only case that tests three failure modes nothing else covers:
+//   1. Misleading dominant signal   — 10x traffic is loud but only the proximate
+//                                     cause; the retry config is the root cause
+//   2. Memory anchoring             — the Singles Day precedent's fix was "scale
+//                                     up", which is wrong here. This is the case
+//                                     that validates Week 4's episodic memory
+//                                     does not become a liability
+//   3. Hallucination under pressure — there is NO recent deploy, and the correct
+//                                     behavior is to say so rather than invent one
+// It also distinguishes immediate mitigation from root-cause fix, which is the
+// single most SRE-specific judgment in the whole golden set.
+//
+// TO REALIZE IT (Week 6, when the golden set grows toward 55):
+//   - add retry-storm fault injection to mock/services/_shared/fault.py:
+//     gateway retries with max_attempts=3 and no backoff on 5xx
+//   - expose a DB/connection-pool saturation surface (the mock has no such
+//     bottleneck today; Redis pool or an httpx connection limit could stand in)
+//   - drop the JVM/GC metrics — the mock is Python/FastAPI, not JVM. The
+//     equivalent local signal is event-loop lag or worker saturation
+//   - rewrite as a 3-file directory; the `expected` block below maps almost
+//     directly onto expected.yaml
+// ============================================================================
+
 // GS-LOAD-001 — traffic-driven cascade with retry storm amplification
 // Difficulty: hard (multi-signal, misleading dominant signal, retry-storm root cause not the traffic itself)
 //

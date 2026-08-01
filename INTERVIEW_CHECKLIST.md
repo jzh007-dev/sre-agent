@@ -21,10 +21,10 @@ Fill this file as the project evolves. Every checkbox is a piece of interview ev
 
 ## 1. Context construction
 
-- [ ] System / phase / retrieved / scratchpad **prompt layering** documented — file: `prompts/README.md`
+- [ ] **Prompt layering** documented — `[A]` methodology → `[B]` output contract → `[C]` integration facet → `[D]` budget, ordered by cache prefix — file: `agent/prompts/assemble.py`
 - [ ] **Prompt cache hit rate** measured and optimized — number: `_____ %`
-- [ ] **Cache breakpoint ordering** decided (stable prefix first, dynamic content last) — evidence: `llm_gateway.py`
-- [ ] **Context truncation policy** per phase (LRU / importance-scored / summary) — decision: `_____`
+- [ ] **Cache breakpoint ordering** decided (stable prefix first, dynamic last) — evidence: `agent/llm/gateway.py`
+- [ ] **Context truncation policy** (per-result cap / oldest-result folding / compaction threshold) — evidence: `agent/core/context.py`
 - [ ] **Tool result injection**: raw vs summary vs structured — decision: `_____`
 - [ ] **Few-shot examples** dynamically selected per incident tag — evidence: `retrieval.py`
 - [ ] Data point ready: "cache hit rate from X% → Y%, cost per incident from $Z → $W"
@@ -36,7 +36,7 @@ Fill this file as the project evolves. Every checkbox is a piece of interview ev
 - [ ] Enums used instead of free strings where possible
 - [ ] **Tool selection accuracy** measured (which tool did the agent call for known-answer cases) — number: `_____ %`
 - [ ] **Tool count vs accuracy** curve documented (add tool N+1, does accuracy go up or down?)
-- [ ] **Parallel tool call groups** identified — evidence: `graph_definition.py`
+- [ ] **Parallel tool calls** — several `tool_use` blocks per response via `asyncio.gather` — evidence: `agent/core/loop.py`
 - [ ] Tool error message design deliberate — errors are inputs to the next LLM decision
 
 ## 3. Agent loop control
@@ -44,9 +44,9 @@ Fill this file as the project evolves. Every checkbox is a piece of interview ev
 - [ ] **Termination conditions** enumerated: task complete / max_iterations / cost budget / user cancel
 - [ ] **Loop detection** implemented: 3× same tool + same args → forced reflection
 - [ ] **Tool call budget** enforced — global `MAX_TURNS` backstop now; per-tool budgets when observable abuse appears. See `ARCHITECTURE.md` §3
-- [ ] **Per-node cost budget** enforced with degradation path
-- [ ] **Reflection step** after each phase: "is the evidence sufficient?"
-- [ ] Data point ready: "% of runs that hit reflection, % of those that recovered"
+- [ ] **Per-investigation cost budget** enforced at the gateway with a degradation path (refuse the call, emit an insufficient-evidence report)
+- [ ] **Refute sub-loop** mandatory before delivery — `submit_report` returns `is_error` with no refutation on record
+- [ ] Data point ready: "% of hypotheses killed by refute; `precompute_override_rate`"
 
 ## 4. Memory / retrieval
 
@@ -60,9 +60,9 @@ Fill this file as the project evolves. Every checkbox is a piece of interview ev
 
 ## 5. Evaluation
 
-- [ ] **Golden set** ≥ 30 cases, difficulty distributed — see `eval/golden/`
+- [ ] **Golden set** ~30 cases (20 ordinary + 10 adversarial), difficulty distributed — see `eval/golden/`
 - [ ] **LLM judge** designed with rubric — see `EVAL.md`
-- [ ] **Judge validated** against manual scoring (kappa ≥ 0.7) — number: `_____`
+- [ ] **Judge validated** against a hand-authored 24-example anchor set *before* it scores real runs (kappa ≥ 0.7 as a gate) — number: `_____`
 - [ ] **Multi-dimensional metrics**: accuracy, tool efficiency, cost, latency, hallucination — all reported per run
 - [ ] **Nightly regression** running via GitHub Actions
 - [ ] **Smoke set on PR** running
@@ -74,25 +74,27 @@ Fill this file as the project evolves. Every checkbox is a piece of interview ev
 - [ ] **Tool retry with exponential backoff** — evidence: `mcp_client.py`
 - [ ] **Idempotency keys** on all WRITE tools
 - [ ] **Circuit breaker** per tool (N failures → open for M minutes)
-- [ ] **Durable workflow via Temporal** — verified with kill-worker test
-- [ ] **Kill test** performed: kill worker mid-verify, workflow resumes correctly
-- [ ] Data point ready: "recovery time after worker crash: _____ seconds"
+- [ ] **Durability**: per-investigation JSONL append log; Temporal deliberately out of scope with a written Tier 2 migration ([§32](./TRADEOFFS.md#32-temporal-is-out-of-scope-not-deferred))
+- [ ] **Replay test** performed: `srectl replay <investigation-id>` reconstructs `messages` from the log
+- [ ] Data point ready: "investigations reconstructable from the JSONL log: _____ %"
 
 ## 7. Cost engineering
 
-- [ ] **Per-call cost logging** (input / output / cache tokens separated) — evidence: `llm_gateway.py`
-- [ ] **Model routing** implemented and measured — table of `phase → model → avg_cost`
+- [ ] **Per-call cost logging** (input / output / cache tokens separated) — evidence: `agent/llm/cost.py`
+- [ ] **Model routing by task nature** (main loop / refute / judge) measured — table of `call kind → model → avg_cost`
 - [ ] **Prompt cache economics** understood (cache write 1.25× read; breakeven at 2 hits)
 - [ ] **Batch API** used for eval runs on historical data (50% discount)
 - [ ] **Tool result caching** within an incident (topology, deploy list)
-- [ ] **Cost degradation path** when per-incident budget hit
-- [ ] Data point ready: "median cost per incident: $X. Broken down: triage $A, collect $B, verify $C."
+- [ ] **Cost degradation path** when per-investigation budget hit — gateway refuses the call, harness emits an "insufficient evidence" report
+- [ ] Data point ready: "median cost per investigation: $X. Broken down: main loop $A, refute sub-loop $B, judge $C."
+- [ ] Data point ready: "gateway cache hit rate $X% — nightly eval over ~30 cases costs $Y instead of $Z"
 
 ## 8. Latency
 
 - [ ] **Streaming** used where user-facing (report to Slack streams as generated)
-- [ ] **Parallel tool calls** in collect phase — evidence: `nodes/collect.py`
-- [ ] **Speculative retrieval** during triage (prefetch similar_incidents async)
+- [ ] **Parallel tool calls** — several `tool_use` blocks in one response dispatched with `asyncio.gather`; evidence: wall-clock delta on the 4-alert cascade case
+- [ ] **Two-stage output** — preliminary verdict streamed within seconds, full report after
+- [ ] **Speculative retrieval** in harness ② (prefetch similar investigations async, off the critical path)
 - [ ] **TTFT vs total latency** measured separately
 - [ ] **Critical path profile** — where the 30 seconds go
 - [ ] Data point ready: "p50 / p90 / p99 latency: _____ / _____ / _____ seconds"
@@ -101,7 +103,7 @@ Fill this file as the project evolves. Every checkbox is a piece of interview ev
 
 - [ ] **Langfuse trace** on every LLM + tool call — verified
 - [ ] **Decision-chain visualization** available (hypothesis → evidence → verdict)
-- [ ] **Replay capability**: any past incident re-runnable from stored state (Temporal history)
+- [ ] **Replay capability**: any past investigation re-runnable from its JSONL log
 - [ ] **Error taxonomy** defined: hallucination / tool_error / data_missing / prompt_bug
 - [ ] **Error rate per class** tracked over time
 - [ ] **Prompt version** stamped on every trace
@@ -113,7 +115,7 @@ See [SECURITY.md](./SECURITY.md) for the full threat model and five-layer defens
 
 ### 10.1 Layer 1 — Message construction (data isolation)
 
-- [ ] **Untrusted-content XML wrapping** — every log/metric/label/memory item wrapped in `<untrusted_data source="...">` — evidence: `context_builder.py`
+- [ ] **Untrusted-content XML wrapping** — every log/metric/label/memory item wrapped in `<untrusted_data source="...">` — evidence: `agent/security/sanitize.py`
 - [ ] **System prompt anti-injection clause** — explicit instruction to never follow content inside untrusted tags
 - [ ] **Sanitization**: strip C0/C1 control chars, zero-width, homoglyphs; escape fake closing tags; normalize NFC
 - [ ] **Per-item length cap** (4KB); truncation marker on overflow
@@ -121,7 +123,7 @@ See [SECURITY.md](./SECURITY.md) for the full threat model and five-layer defens
 
 ### 10.2 Layer 2 — Structured output constraints
 
-- [ ] **All node outputs are Pydantic / JSON Schema typed** — no free-form text-with-tool-calls
+- [ ] **The report is a forced tool call with a validated schema** — it is the only exit from the loop, so structured output is not skippable
 - [ ] **Enum constraints** on high-risk fields (`target_service` ∈ known_services)
 - [ ] **Bounded list sizes** (max 4 hypotheses, max 3 proposed actions)
 - [ ] **Retry-on-schema-fail** with error fed back to LLM
@@ -130,7 +132,7 @@ See [SECURITY.md](./SECURITY.md) for the full threat model and five-layer defens
 ### 10.3 Layer 3 — Second-model review
 
 - [ ] **Reviewer LLM** implemented, different family from primary — pair: `_____ / _____`
-- [ ] **Reviewer prompt** with 5-point rubric — file: `prompts/reviewer.jinja2`
+- [ ] **Reviewer prompt** with 5-point rubric — file: `agent/prompts/reviewer.md`
 - [ ] **PROCEED / FLAG / BLOCK verdict** enforced in workflow
 - [ ] **BLOCK escalates to human**, does not proceed silently
 - [ ] Data point: FLAG rate; BLOCK rate; false-block rate — numbers: `_____`

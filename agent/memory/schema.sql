@@ -1,0 +1,3 @@
+-- pgvector schema: runbook_chunks + past_investigations.
+-- Every row carries namespace (integration) and tenant_id (Tier 2 seam).
+-- Placeholder — W4 L1.
