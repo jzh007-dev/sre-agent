@@ -26,10 +26,20 @@ from agent.core.investigation import Investigation, ToolBudget, Window
 from agent.llm.clients import env_summary, live_gateway, load_env, smoke_routing
 from agent.llm.cost import Ledger
 from agent.llm.provider_catalog import MODELS, model
+from agent.llm.reconcile import (
+    DEFAULT_MIN_SPEND_USD,
+    ReconcileUnavailable,
+    Reconciliation,
+    reader_for,
+)
 from agent.llm.request import PromptFragment, SystemPrompt
 from agent.llm.routing import CallKind
 from agent.llm.types import Message, TextBlock
 from agent.llm.usage import cost_of
+
+#: Only used to convert a CNY balance delta for comparison. Recorded in output so a
+#: wrong rate is visible rather than silently shifting the verdict. Not a price.
+_FX_CNY_USD = 0.14
 
 #: Long enough that a prompt cache has something to hit on the second call —
 #: providers set a minimum cacheable prefix (commonly ~1k tokens), so a short
@@ -58,6 +68,16 @@ def _investigation() -> Investigation:
     )
 
 
+def _read_balance(provider: str) -> tuple[float, str] | None:
+    """Balance before/after, when the provider exposes it. Never fatal — an
+    unreadable balance means "cannot reconcile", not "the run failed"."""
+    try:
+        return reader_for(provider).balance()
+    except (ReconcileUnavailable, Exception) as exc:  # noqa: BLE001
+        print(f"  (balance unavailable: {exc})")
+        return None
+
+
 async def _one_provider(model_id: str, stream: bool) -> dict:
     traces: list[dict] = []
     gateway = live_gateway(
@@ -70,6 +90,8 @@ async def _one_provider(model_id: str, stream: bool) -> dict:
     spec = model(model_id)
     if spec.provider not in gateway.transports:
         return {"model": model_id, "skipped": "no credentials"}
+
+    before = _read_balance(spec.provider)
 
     inv = _investigation()
     ledger = Ledger(investigation_id=inv.id)
@@ -91,8 +113,24 @@ async def _one_provider(model_id: str, stream: bool) -> dict:
     if stream:
         streamed_chunks = await _stream_once(gateway, spec, question)
 
+    after = _read_balance(spec.provider) if before else None
+    reconciliation = None
+    if before and after:
+        reconciliation = Reconciliation(
+            provider=spec.provider,
+            currency=before[1],
+            balance_before=before[0],
+            balance_after=after[0],
+            # FX is passed explicitly rather than guessed: a hidden conversion error
+            # is indistinguishable from a price change, which is the exact signal
+            # this check exists to produce.
+            fx_to_usd=spec.price.fx_to_usd if spec.price.currency != "USD" else _FX_CNY_USD,
+            predicted_usd=ledger.money_spent_usd,
+        )
+
     entries = [e for e in ledger.entries if not e.cached]
     return {
+        "reconciliation": reconciliation,
         "model": model_id,
         "provider": spec.provider,
         "first_answer": _first_text(first)[:120],
@@ -240,6 +278,9 @@ def main(argv: list[str] | None = None) -> int:
         if result["streamed_chunks"]:
             print(f"  streamed text chunks: {result['streamed_chunks']}")
         print(f"  ledger: {json.dumps(result['ledger'])}")
+        rec = result.get("reconciliation")
+        if rec is not None:
+            print(f"  reconcile: {rec.explain()}")
         for note in _price_check(result):
             print(f"  NOTE: {note}")
 

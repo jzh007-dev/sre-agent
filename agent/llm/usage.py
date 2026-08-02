@@ -14,6 +14,7 @@ labelled as such in eval output instead of being presented as measured fact.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 #: Bumped whenever any price below changes. Stamped onto every ledger entry and
 #: every cache entry, so a cost number stays attributable after a price edit.
@@ -55,14 +56,28 @@ class Usage:
         )
 
 
+#: Days after which an unreconciled price table is treated as stale. Providers
+#: change rates on their own schedule, so a table that is merely *old* is suspect
+#: even when it was verified when written. Answers "what if they raise prices":
+#: the system notices the table has aged and says so, rather than confidently
+#: reporting figures derived from last quarter's rates.
+PRICE_TABLE_MAX_AGE_DAYS = 90
+
+
 @dataclass(frozen=True)
 class Price:
-    """USD per 1M tokens.
+    """Rates per 1M tokens, in `currency`.
 
     `cache_write` and `cache_read` default to the ratios the major providers
     converge on (writes at 1.25x input, reads at 0.1x input). A provider that
     differs states its own numbers; a provider with no prompt cache leaves them
     at their defaults and simply never reports cache tokens.
+
+    **Currency is explicit because it is a second source of error.** DeepSeek's
+    balance endpoint reports CNY while these figures are USD, so a USD cost carries
+    an FX assumption stacked on top of the rate itself. `fx_to_usd` records the rate
+    used, so a cost figure is reproducible rather than depending on what the
+    exchange rate happened to be when someone wrote the table.
     """
 
     input: float
@@ -73,6 +88,26 @@ class Price:
     #: False until checked against the provider's published pricing. Propagates
     #: into eval output so an unverified figure is never reported as measured.
     verified: bool = False
+    #: What the rates above are denominated in.
+    currency: str = "USD"
+    #: Multiplier to USD. 1.0 when `currency == "USD"`. Recorded rather than applied
+    #: silently, so a cost can be re-derived if the rate was wrong.
+    fx_to_usd: float = 1.0
+    #: ISO date the FX rate was taken. Empty when no conversion applies.
+    fx_as_of: str = ""
+
+    @property
+    def stale_after(self) -> str:
+        """The date past which this table should be re-checked."""
+        return _add_days(_date_part(self.as_of), PRICE_TABLE_MAX_AGE_DAYS)
+
+    def is_stale(self, today: str) -> bool:
+        """Whether the table has aged past its window.
+
+        `today` is passed in rather than read from the clock so that this is
+        testable and so a cost report is a pure function of its inputs.
+        """
+        return today > self.stale_after
 
     @property
     def cache_write_rate(self) -> float:
@@ -106,3 +141,17 @@ def cache_savings(usage: Usage, price: Price) -> float:
     full = usage.cache_read_tokens * price.input
     discounted = usage.cache_read_tokens * price.cache_read_rate
     return (full - discounted) / 1_000_000.0
+
+
+def _date_part(version: str) -> str:
+    """The ISO date prefix of a price-table version like "2026-08-02.unverified"."""
+    return version.split(".", 1)[0].strip()
+
+
+def _add_days(iso_date: str, days: int) -> str:
+    try:
+        return (date.fromisoformat(iso_date) + timedelta(days=days)).isoformat()
+    except ValueError:
+        # An unparseable version string is treated as immediately stale rather than
+        # as never stale — failing toward "check this" is the safe direction.
+        return "0001-01-01"

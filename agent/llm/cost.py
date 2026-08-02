@@ -41,6 +41,9 @@ class CostEntry:
     fell_back: bool = False
     price_table_version: str = PRICE_TABLE_VERSION
     price_verified: bool = False
+    #: The date past which this entry's price table should be re-checked. Carried on
+    #: the entry so a historical cost stays interpretable after the table moves on.
+    price_stale_after: str = ""
     cache_savings_usd: float = 0.0
 
 
@@ -81,6 +84,7 @@ class Ledger:
             fell_back=fell_back,
             price_table_version=price.as_of,
             price_verified=price.verified,
+            price_stale_after=price.stale_after,
             cache_savings_usd=cache_savings(usage, price),
         )
         self.entries.append(entry)
@@ -131,6 +135,21 @@ class Ledger:
     def fully_verified_prices(self) -> bool:
         return all(e.price_verified for e in self.entries) if self.entries else True
 
+    def prices_stale(self, today: str) -> bool:
+        """Whether any entry was priced with a table that has aged out.
+
+        `today` is a parameter so a cost report stays a pure function of its inputs —
+        the same ledger must not describe itself differently tomorrow.
+        """
+        return any(e.price_stale_after and today > e.price_stale_after for e in self.entries)
+
+    @property
+    def price_table_versions(self) -> set[str]:
+        """Distinct tables involved. More than one means a price edit landed
+        mid-run, and the total mixes rates — worth flagging rather than summing
+        quietly."""
+        return {e.price_table_version for e in self.entries}
+
     def by_kind(self) -> dict[str, float]:
         """Money by `CallKind`. The breakdown the interview checklist asks for
         ("main loop $A, refute $B, judge $C")."""
@@ -156,4 +175,6 @@ class Ledger:
             "cache_read_tokens": self.usage_total.cache_read_tokens,
             "fell_back": self.fell_back,
             "prices_verified": self.fully_verified_prices,
+            "price_table_versions": sorted(self.price_table_versions),
+            "mixed_price_tables": len(self.price_table_versions) > 1,
         }

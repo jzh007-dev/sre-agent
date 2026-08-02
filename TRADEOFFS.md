@@ -510,6 +510,31 @@ routing ─→ construction ─→ │ budget gate ─→ transport │ ─→ p
 - **Cost**: we own the maintenance when a provider changes its error shapes or adds a caching mechanism.
 - **Reconsider when**: provider count passes ~6; or a non-standard endpoint (Azure, Vertex) is needed; or load balancing across multiple API keys per provider is needed. Because the `LLM` protocol already exists, the swap is one new file and a wiring change.
 
+## 35. Price drift: freeze history, flag age, reconcile against billing
+
+- **Decision**: three defences against a checked-in price table going wrong, layered by how much they cost to build.
+  1. **History is frozen.** Every `CostEntry` stores the cost computed at call time plus the `price_table_version` that produced it, and a cache replay charges the *original* cost rather than recomputing. A rate change can therefore never rewrite a past number.
+  2. **Age is a signal.** `Price.as_of` plus a 90-day window; past it, `Ledger.prices_stale()` reports through the same channel as `prices_verified: false`. Verified-when-written is not verified-now.
+  3. **Reconciliation is the automatic detector.** Snapshot the provider's account balance, run the work, snapshot again; compare what was actually charged against what the table predicted. Divergence beyond tolerance means the table is wrong, and the ratio says roughly by how much.
+- **Alternatives**:
+  - (A) Treat prices as a constant and update them by hand when someone remembers.
+  - (B) Use a maintained third-party price map (LiteLLM ships one).
+  - (C) Read cost from the provider's response — not available: none of DeepSeek, OpenAI or Anthropic return a cost field.
+- **Why**: (A) is the default and it fails silently, which is the worst failure mode for a project whose thesis is measured cost — a stale table produces confident wrong numbers indefinitely, and nothing looks broken. (B) trades our staleness for someone else's, which is better but still unverified locally, and is one of the arguments [§34](#34-litellm-not-adopted-kept-as-a-documented-swap-in) already weighed. Reconciliation is the only option that closes the loop without a human reading a web page.
+- **Cost and limits, stated plainly**:
+  - **Resolution floor.** DeepSeek reports balance to two decimals of CNY, roughly $0.0014, while a single smoke call costs about $0.00007 — three orders of magnitude below it. Reconciliation is a **batch** instrument: an eval run over ~30 cases lands in the $0.1-1 range and moves the balance measurably. Below `min_spend_usd` the verdict is `inconclusive` rather than a ratio, because reporting rounding error as a finding is worse than reporting nothing.
+  - **Currency is a second error source.** The balance arrives in CNY while the ledger is USD, so a USD figure carries an FX assumption stacked on the rate itself. `Price.currency` / `fx_to_usd` / `fx_as_of` record it, because **a hidden conversion error is indistinguishable from a price change** — and distinguishing them is the entire point of the check.
+  - **Shared accounts confound it.** Other workloads on the same API key show up as divergence. Tolerance is deliberately generous (±25%) so the check does not cry wolf and get ignored.
+  - Only providers exposing a balance endpoint can be reconciled at all. That is a real gap, reported rather than silently skipped.
+- **Reconsider when**: a provider starts returning per-call cost (then reconciliation becomes a cross-check rather than the primary mechanism), or when spend grows enough that a monthly invoice is the better source of truth.
+
+## 36. Environment note: the price table is unverified because the docs were unreachable
+
+- **Situation**: the rates in `provider_catalog.MODELS` were written from memory and could not be checked, because this environment's fetch tooling is blocked by policy — not because the site was down. The provider *API* is reachable (real calls succeed, and the balance endpoint responds); only the documentation site is not.
+- **Decision**: leave `verified=False` and let `prices_verified: false` propagate into every ledger summary, every trace and every future eval row, rather than flipping a flag on unchecked numbers.
+- **Why this is recorded rather than quietly fixed later**: setting `verified=True` on rates nobody checked is exactly the failure [§30](#30-unmeasured-targets-are-labelled-hypotheses) exists to prevent — and it is worse than an invented target, because a target is visibly aspirational while a cost figure reads as a measurement. The arithmetic *is* verified: recomputing cost from real reported usage matches the ledger to 1e-9. Only the rates are open.
+- **How to close it**: check the provider's published per-1M rates against `MODELS["deepseek-chat"].price` (currently input `0.28`, output `1.10`, cache-read `0.028`, denominated USD), set `verified=True`, and bump `PRICE_TABLE_VERSION`. Then run `srectl smoke` around a real eval batch and confirm reconciliation returns `consistent`.
+
 ---
 
 ## Meta-decisions
