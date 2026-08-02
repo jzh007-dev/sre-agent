@@ -88,14 +88,14 @@ class StreamingClient:
 
 
 def _adapter(events) -> StreamingOpenAICompatAdapter:
-    spec = model("deepseek-chat")
+    spec = model("deepseek-v4-flash")
     return StreamingOpenAICompatAdapter(
         provider_spec=PROVIDERS[spec.provider], model_spec=spec, client=StreamingClient(events)
     )
 
 
 def _request():
-    return build("deepseek-chat", [Message(role="user", content=[TextBlock(text="hi")])])
+    return build("deepseek-v4-flash", [Message(role="user", content=[TextBlock(text="hi")])])
 
 
 class TestStreaming(unittest.IsolatedAsyncioTestCase):
@@ -184,7 +184,7 @@ class TestStreaming(unittest.IsolatedAsyncioTestCase):
     async def test_non_streaming_adapter_is_rejected_clearly(self):
         from agent.llm.openai_compat import OpenAICompatAdapter
 
-        spec = model("deepseek-chat")
+        spec = model("deepseek-v4-flash")
         plain = OpenAICompatAdapter(
             provider_spec=PROVIDERS[spec.provider], model_spec=spec, client=StreamingClient([])
         )
@@ -208,7 +208,7 @@ class TestContextPreCheck(unittest.TestCase):
 
     def test_an_oversized_request_reports_what_is_needed(self):
         huge = build(
-            "deepseek-chat",
+            "deepseek-v4-flash",
             [Message(role="user", content=[TextBlock(text="x" * 400_000)])],
         )
         fits, why = check_context(huge, context_window=64_000)
@@ -216,14 +216,14 @@ class TestContextPreCheck(unittest.TestCase):
         self.assertIn("compaction needed", why)
 
     def test_estimate_counts_system_messages_tools_and_reserved_output(self):
-        bare = build("deepseek-chat", [])
+        bare = build("deepseek-v4-flash", [])
         with_system = build(
-            "deepseek-chat",
+            "deepseek-v4-flash",
             [],
             system=SystemPrompt.of(PromptFragment("m", "x" * 3500, stable_across="project")),
         )
         with_tools = build(
-            "deepseek-chat",
+            "deepseek-v4-flash",
             [],
             [{"name": "t", "description": "d" * 3500, "input_schema": {}}],
         )
@@ -251,7 +251,7 @@ class TestGatewayContextGate(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError("transport must not be reached")
 
         gateway = Gateway(
-            routing=smoke_routing("deepseek-chat"),
+            routing=smoke_routing("deepseek-v4-flash"),
             transports={"deepseek": Transport(adapter=NeverCalled())},
             cache=ResponseCache(store=MemoryStore()),
             allow_fallback=False,
@@ -273,7 +273,7 @@ class TestGatewayContextGate(unittest.IsolatedAsyncioTestCase):
         # fits) and it carries the numbers compaction needs.
         self.assertEqual(ctx.exception.reason, "context_overflow")
         self.assertGreater(ctx.exception.excess_tokens, 0)
-        self.assertEqual(ctx.exception.model_id, "deepseek-chat")
+        self.assertEqual(ctx.exception.model_id, "deepseek-v4-flash")
 
 
 if __name__ == "__main__":

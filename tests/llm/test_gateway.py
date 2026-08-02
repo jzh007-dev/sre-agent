@@ -216,7 +216,7 @@ class TestCacheAndBudget(unittest.IsolatedAsyncioTestCase):
 class TestFallback(unittest.IsolatedAsyncioTestCase):
     def _two_provider_routing(self) -> RoutingConfig:
         return RoutingConfig(
-            agent_model="deepseek-chat",
+            agent_model="deepseek-v4-flash",
             assignments={
                 CallKind.JUDGE: "claude-sonnet-5",
                 CallKind.REVIEWER: "claude-sonnet-5",

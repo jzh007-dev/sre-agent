@@ -105,7 +105,14 @@ class AnthropicAdapter:
                 # raising: an unrecognised block is not a failure, and the loop only
                 # keys on text and tool_use.
             stop = _STOP_REASONS.get(getattr(raw, "stop_reason", ""), StopReason.END_TURN)
-            return Response(stop_reason=stop, content=content), _parse_usage(raw)
+            return (
+                Response(
+                    stop_reason=stop,
+                    content=content,
+                    served_model=str(getattr(raw, "model", "") or ""),
+                ),
+                _parse_usage(raw),
+            )
         except errors.ProviderError:
             raise
         except Exception as exc:  # noqa: BLE001

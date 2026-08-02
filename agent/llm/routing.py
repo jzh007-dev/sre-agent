@@ -106,6 +106,12 @@ class RoutingConfig:
 
 def satisfies(spec: ModelSpec, req: Requirements) -> tuple[bool, str]:
     """Whether a model meets the hard constraints, and why not if it does not."""
+    if spec.alias_of:
+        return False, (
+            f"{spec.id} is a provider alias for {spec.alias_of}, not a concrete model. "
+            f"Route to {spec.alias_of} instead: prices are per model, and EVAL.md keys "
+            f"reproducibility on model_version, which a moving alias silently breaks"
+        )
     if req.needs_tools and not spec.supports_tools:
         return False, f"{spec.id} does not support tool use"
     if req.needs_reliable_tool_use and not spec.reliable_tool_use:
@@ -169,7 +175,9 @@ def route(config: RoutingConfig, kind: CallKind) -> tuple[ModelSpec, ...]:
     return tuple(model(model_id) for model_id in config.candidates(kind))
 
 
-def default_config(agent_model: str = "deepseek-chat", judge_model: str = "claude-sonnet-5") -> RoutingConfig:
+def default_config(
+    agent_model: str = "deepseek-v4-flash", judge_model: str = "claude-sonnet-5"
+) -> RoutingConfig:
     """The Tier 1.5 wiring: one primary carrying all tuning, one different family
     for judge and reviewer, cheap tier for classification.
 

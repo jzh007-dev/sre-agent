@@ -16,7 +16,7 @@ from the test suite.
 | `core/investigation.py` | — | The time window every query covers; the budget ceiling; owns `messages` |
 | `core/loop.py` | ④ ReAct kernel | Nothing about *how* to call — only *whether to keep going*. Converts contract errors into `Aborted` events |
 | `llm/routing.py` | routing | Which model serves this `CallKind`, and the fallback order. Rejects a judge sharing the agent's family at **wiring** time |
-| `llm/provider_catalog.py` | construction | Model facts: context window, price, tier, whether explicit cache markers are honoured |
+| `llm/provider_catalog.py` | construction | Model facts: context window, price, tier, cache-marker support, and **whether the id is a provider alias** (routing refuses those — see [§37](../TRADEOFFS.md#37-route-to-concrete-models-never-to-a-provider-alias)) |
 | `llm/credentials.py` | construction | Whether a provider is usable at all |
 | `llm/request.py` | construction | Prompt fragment **order** (cache prefix), where breakpoints go, the cache key, the context pre-check |
 | `llm/gateway.py` | assembly | The order of operations, the budget refusal, fallback, tracing |

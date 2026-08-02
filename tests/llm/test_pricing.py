@@ -61,7 +61,7 @@ class TestPriceStaleness(unittest.TestCase):
         self.assertFalse(hasattr(Cost(native=1.0, currency="CNY"), "usd"))
 
     def test_catalogue_prices_are_currently_unverified(self):
-        self.assertFalse(model("deepseek-chat").price.verified)
+        self.assertFalse(model("deepseek-v4-flash").price.verified)
         self.assertGreater(PRICE_TABLE_MAX_AGE_DAYS, 0)
 
 
@@ -70,7 +70,7 @@ class TestLedgerProvenance(unittest.TestCase):
         ledger = Ledger(investigation_id="inv")
         ledger.record(
             kind="main_loop",
-            model_id="deepseek-chat",
+            model_id="deepseek-v4-flash",
             provider="deepseek",
             usage=Usage(1000, 100),
             price=price,
@@ -88,7 +88,7 @@ class TestLedgerProvenance(unittest.TestCase):
         ledger = self._ledger(Price(input=1.0, output=2.0, as_of="2026-01-01"))
         ledger.record(
             kind="main_loop",
-            model_id="deepseek-chat",
+            model_id="deepseek-v4-flash",
             provider="deepseek",
             usage=Usage(1000, 100),
             price=Price(input=2.0, output=4.0, as_of="2026-02-01"),
@@ -98,7 +98,7 @@ class TestLedgerProvenance(unittest.TestCase):
         self.assertEqual(len(summary["price_table_versions"]), 2)
 
     def test_a_single_table_is_not_flagged(self):
-        summary = self._ledger(model("deepseek-chat").price).summary()
+        summary = self._ledger(model("deepseek-v4-flash").price).summary()
         self.assertFalse(summary["mixed_price_tables"])
 
     def test_historical_cost_is_frozen_not_recomputed(self):
@@ -108,7 +108,7 @@ class TestLedgerProvenance(unittest.TestCase):
         ledger = Ledger(investigation_id="inv")
         ledger.record(
             kind="main_loop",
-            model_id="deepseek-chat",
+            model_id="deepseek-v4-flash",
             provider="deepseek",
             usage=Usage(1000, 100),
             price=Price(input=99.0, output=99.0),  # today's (absurd) table
@@ -121,7 +121,7 @@ class TestLedgerProvenance(unittest.TestCase):
         ledger = Ledger(investigation_id="inv")
         ledger.record(
             kind="main_loop",
-            model_id="deepseek-chat",
+            model_id="deepseek-v4-flash",
             provider="deepseek",
             usage=Usage(1000, 100),
             price=Price(input=2.0, output=8.0, currency="CNY"),
@@ -216,7 +216,7 @@ class TestReconciliation(unittest.TestCase):
 class TestCacheSavingsMath(unittest.TestCase):
     def test_savings_is_the_gap_between_full_and_discounted_input(self):
         """The number behind the 85% figure the smoke run reported."""
-        price = model("deepseek-chat").price
+        price = model("deepseek-v4-flash").price
         usage = Usage(input_tokens=14, output_tokens=18, cache_read_tokens=1536)
         full_input_cost = 1536 * price.input / 1_000_000
         discounted = 1536 * price.cache_read_rate / 1_000_000
@@ -225,10 +225,10 @@ class TestCacheSavingsMath(unittest.TestCase):
         self.assertEqual(saving.currency, price.currency)
 
     def test_no_cached_tokens_means_no_savings(self):
-        self.assertEqual(cache_savings(Usage(100, 10), model("deepseek-chat").price).native, 0.0)
+        self.assertEqual(cache_savings(Usage(100, 10), model("deepseek-v4-flash").price).native, 0.0)
 
     def test_cost_uses_the_discounted_rate_for_cached_reads(self):
-        price = model("deepseek-chat").price
+        price = model("deepseek-v4-flash").price
         cached = cost_of(Usage(input_tokens=0, cache_read_tokens=1000), price)
         uncached = cost_of(Usage(input_tokens=1000), price)
         self.assertLess(cached.native, uncached.native)
@@ -253,7 +253,7 @@ class TestCacheSavingsMath(unittest.TestCase):
         ledger = Ledger(investigation_id="inv")
         ledger.record(
             kind="main_loop",
-            model_id="deepseek-chat",
+            model_id="deepseek-v4-flash",
             provider="deepseek",
             usage=Usage(input_tokens=1_000_000),
             price=Price(input=2.0, output=8.0, currency="CNY"),

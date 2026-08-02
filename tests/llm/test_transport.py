@@ -21,7 +21,7 @@ OK = (Response(stop_reason=StopReason.END_TURN, content=[TextBlock(text="ok")]),
 
 
 def _request():
-    return build("deepseek-chat", [Message(role="user", content=[TextBlock(text="hi")])])
+    return build("deepseek-v4-flash", [Message(role="user", content=[TextBlock(text="hi")])])
 
 
 class ScriptedAdapter:

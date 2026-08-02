@@ -199,6 +199,13 @@ class BoundLLM:
                 model_id=spec.id,
             ) from exc
 
+        # The provider may have served a different model than we asked for — model
+        # names are frequently aliases. Recording the mismatch matters because cost is
+        # per model and EVAL keys reproducibility on model_version; routing already
+        # refuses catalogued aliases, so a mismatch here means an *uncatalogued* one.
+        served = response.served_model
+        alias_mismatch = bool(served and served != spec.id)
+
         cost = cost_of(usage, spec.price)
         self.gateway.cache.put(
             key,
@@ -219,7 +226,15 @@ class BoundLLM:
             attempts=len(attempts),
             fell_back=fell_back,
         )
-        self._trace(spec, key, cached=False, attempts=attempts, fell_back=fell_back)
+        self._trace(
+            spec,
+            key,
+            cached=False,
+            attempts=attempts,
+            fell_back=fell_back,
+            served_model=served,
+            alias_mismatch=alias_mismatch,
+        )
         return response
 
     def _check_budget(self, spec: ModelSpec) -> None:
@@ -261,12 +276,19 @@ class BoundLLM:
         cached: bool,
         attempts: Sequence[Attempt],
         fell_back: bool,
+        served_model: str = "",
+        alias_mismatch: bool = False,
     ) -> None:
         self.gateway.tracer(
             {
                 "investigation_id": self.inv.id,
                 "call_kind": self.kind.value,
                 "model_id": spec.id,
+                #: What the provider says answered. Differing from `model_id` means we
+                #: asked for an uncatalogued alias, so the price and the recorded
+                #: model_version are both attached to the wrong thing.
+                "served_model": served_model,
+                "alias_mismatch": alias_mismatch,
                 "provider": spec.provider,
                 "cache_key": key,
                 "cache_hit": cached,

@@ -126,7 +126,14 @@ class OpenAICompatAdapter:
             if any(isinstance(block, ToolUseBlock) for block in content):
                 stop = StopReason.TOOL_USE
 
-            return Response(stop_reason=stop, content=content), _parse_usage(raw)
+            return (
+                Response(
+                    stop_reason=stop,
+                    content=content,
+                    served_model=str(getattr(raw, "model", "") or ""),
+                ),
+                _parse_usage(raw),
+            )
         except errors.ProviderError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -251,20 +258,35 @@ def _parse_arguments(arguments: Any) -> dict[str, Any]:
 def _parse_usage(raw: Any) -> Usage:
     """Normalise usage. Field names and cached-token conventions differ per provider.
 
-    DeepSeek reports `prompt_cache_hit_tokens` *inside* `prompt_tokens`, so the
-    cached portion is subtracted out — otherwise cached tokens would be billed at
-    the full input rate and the cache would appear to save nothing.
+    DeepSeek reports cached tokens *inside* `prompt_tokens`, so the cached portion is
+    subtracted out — otherwise cached tokens would be billed at the full input rate
+    and the cache would appear to save nothing.
+
+    Two representations of the same number are read, because DeepSeek returns both:
+    its own `prompt_cache_hit_tokens` and the OpenAI-style
+    `prompt_tokens_details.cached_tokens`. Reading only one means that if the provider
+    ever drops that field, this silently returns zero cached tokens and starts billing
+    them at full rate — a costing error with no error message.
     """
     usage = getattr(raw, "usage", None)
     if usage is None:
         return Usage()
     prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
     completion = int(getattr(usage, "completion_tokens", 0) or 0)
+
     cache_hit = int(getattr(usage, "prompt_cache_hit_tokens", 0) or 0)
+    if not cache_hit:
+        details = getattr(usage, "prompt_tokens_details", None)
+        cache_hit = int(getattr(details, "cached_tokens", 0) or 0)
+
+    details = getattr(usage, "prompt_tokens_details", None)
+    cache_write = int(getattr(details, "cache_write_tokens", 0) or 0)
+
     return Usage(
         input_tokens=max(prompt - cache_hit, 0),
         output_tokens=completion,
         cache_read_tokens=cache_hit,
+        cache_write_tokens=cache_write,
     )
 
 

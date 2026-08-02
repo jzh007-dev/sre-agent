@@ -535,6 +535,20 @@ routing ─→ construction ─→ │ budget gate ─→ transport │ ─→ p
 - **Why this is recorded rather than quietly fixed later**: setting `verified=True` on rates nobody checked is exactly the failure [§30](#30-unmeasured-targets-are-labelled-hypotheses) exists to prevent — and it is worse than an invented target, because a target is visibly aspirational while a cost figure reads as a measurement. The arithmetic *is* verified: recomputing cost from real reported usage matches the ledger to 1e-9. Only the rates are open.
 - **How to close it**: check the provider's published per-1M rates against `MODELS["deepseek-chat"].price` (currently input `0.28`, output `1.10`, cache-read `0.028`, denominated USD), set `verified=True`, and bump `PRICE_TABLE_VERSION`. Then run `srectl smoke` around a real eval batch and confirm reconciliation returns `consistent`.
 
+## 37. Route to concrete models, never to a provider alias
+
+- **Decision**: the catalogue distinguishes concrete models from provider aliases via `ModelSpec.alias_of`, and **routing refuses an alias at wiring time** with a message naming the concrete model to use. Every response also records `served_model` — what the provider says actually answered — and a mismatch is flagged in the trace.
+- **How this was found**: probing `GET /models` for a *pricing* source returned `deepseek-v4-flash` and `deepseek-v4-pro` — neither of which was in the catalogue. A single call then confirmed that asking for `deepseek-chat` is served by `deepseek-v4-flash`. The catalogue had been built on two names that are not models.
+- **Why it matters more than the unverified rates it was found while chasing**:
+  1. **Prices are per model.** Rates attached to an alias are attached to nothing in particular — and they follow whatever the provider promotes next.
+  2. **[EVAL.md](./EVAL.md) keys reproducibility on `model_version`.** A moving alias makes that key a lie *while looking perfectly stable*: the same golden case rerun after a provider upgrade silently ran on a different model, and both runs record the same name. Every accuracy comparison across that boundary would be invalid and nothing would indicate it.
+- **Alternatives**:
+  - (A) Route to the alias, which is the documented stable entrypoint and needs no updating when a version is retired.
+  - (B) Route to concrete ids and accept that the catalogue must be maintained.
+- **Why (B)**: (A) optimises for not having to touch a config file, at the cost of the one property an evaluation-driven project cannot give up. Pinning is the entire point of a reproducibility key. The maintenance cost is real and bounded: when a model is retired the API returns a clear error at wiring time, which is exactly when we want to hear about it.
+- **Cost**: the catalogue needs updating when a provider retires a model, and `srectl smoke` is the thing that will notice. Aliases are still catalogued — not to route to, but so the rejection message can name the fix.
+- **Reconsider when**: never for eval runs. A production deployment that valued availability over comparability could reasonably route to an alias, and would then have to stop claiming `model_version` reproducibility.
+
 ---
 
 ## Meta-decisions

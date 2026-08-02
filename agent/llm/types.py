@@ -56,6 +56,9 @@ class Message:
 
 @dataclass
 class Usage:
+    """Legacy shape kept for the stub LLM. Real accounting uses `llm.usage.Usage`,
+    which additionally separates prompt-cache reads and writes."""
+
     input_tokens: int = 0
     output_tokens: int = 0
 
@@ -65,6 +68,21 @@ class Response:
     stop_reason: StopReason
     content: list[ContentBlock]
     usage: Usage = field(default_factory=Usage)
+    #: The model the provider says actually served this request.
+    #:
+    #: Recorded because provider model names are frequently **aliases**: asking
+    #: DeepSeek for `deepseek-chat` is served by `deepseek-v4-flash`, and that
+    #: mapping moves when the provider promotes a new flagship. Two things break if
+    #: we record only what we asked for:
+    #:
+    #: - **Cost** is per model, so pricing an alias prices nothing in particular.
+    #: - **Reproducibility**: [EVAL.md](../../EVAL.md) keys a run on `model_version`.
+    #:   A moving alias makes that key a lie while looking perfectly stable — the
+    #:   same case rerun after a provider upgrade silently ran on a different model.
+    #:
+    #: Empty when the adapter could not determine it (the stub, or a provider that
+    #: does not echo the model back).
+    served_model: str = ""
 
     def text_blocks(self) -> list[TextBlock]:
         return [b for b in self.content if isinstance(b, TextBlock)]

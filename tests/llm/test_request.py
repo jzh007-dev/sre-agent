@@ -78,8 +78,8 @@ class TestPromptLayering(unittest.TestCase):
 
 class TestCacheKey(unittest.TestCase):
     def test_identical_requests_share_a_key(self):
-        a = build("deepseek-chat", _messages(), [TOOL], system=_layered())
-        b = build("deepseek-chat", _messages(), [TOOL], system=_layered())
+        a = build("deepseek-v4-flash", _messages(), [TOOL], system=_layered())
+        b = build("deepseek-v4-flash", _messages(), [TOOL], system=_layered())
         self.assertEqual(a.cache_key(), b.cache_key())
 
     def test_tool_schema_change_invalidates_the_key(self):
@@ -88,34 +88,34 @@ class TestCacheKey(unittest.TestCase):
         correct behaviour — adding a tool *should* require re-running eval."""
         changed = dict(TOOL)
         changed["input_schema"] = {"type": "object", "properties": {"query": {"type": "string"}}}
-        a = build("deepseek-chat", _messages(), [TOOL])
-        b = build("deepseek-chat", _messages(), [changed])
+        a = build("deepseek-v4-flash", _messages(), [TOOL])
+        b = build("deepseek-v4-flash", _messages(), [changed])
         self.assertNotEqual(a.cache_key(), b.cache_key())
 
     def test_adding_a_tool_invalidates_the_key(self):
-        a = build("deepseek-chat", _messages(), [TOOL])
-        b = build("deepseek-chat", _messages(), [TOOL, {**TOOL, "name": "query_logs"}])
+        a = build("deepseek-v4-flash", _messages(), [TOOL])
+        b = build("deepseek-v4-flash", _messages(), [TOOL, {**TOOL, "name": "query_logs"}])
         self.assertNotEqual(a.cache_key(), b.cache_key())
 
     def test_model_system_messages_and_params_all_participate(self):
-        base = build("deepseek-chat", _messages(), [TOOL], system=_layered())
+        base = build("deepseek-v4-flash", _messages(), [TOOL], system=_layered())
         variants = {
             "model": build("qwen-plus", _messages(), [TOOL], system=_layered()),
-            "messages": build("deepseek-chat", _messages("different"), [TOOL], system=_layered()),
+            "messages": build("deepseek-v4-flash", _messages("different"), [TOOL], system=_layered()),
             "system": build(
-                "deepseek-chat",
+                "deepseek-v4-flash",
                 _messages(),
                 [TOOL],
                 system=SystemPrompt.of(PromptFragment("methodology", "changed", stable_across="project")),
             ),
             "temperature": build(
-                "deepseek-chat", _messages(), [TOOL], system=_layered(), temperature=0.7
+                "deepseek-v4-flash", _messages(), [TOOL], system=_layered(), temperature=0.7
             ),
             "max_tokens": build(
-                "deepseek-chat", _messages(), [TOOL], system=_layered(), max_tokens=99
+                "deepseek-v4-flash", _messages(), [TOOL], system=_layered(), max_tokens=99
             ),
             "extra param": build(
-                "deepseek-chat", _messages(), [TOOL], system=_layered(), thinking_budget=1000
+                "deepseek-v4-flash", _messages(), [TOOL], system=_layered(), thinking_budget=1000
             ),
         }
         for label, variant in variants.items():
@@ -127,7 +127,7 @@ class TestCacheKey(unittest.TestCase):
             Message(role="assistant", content=[ToolUseBlock(id="t1", name="query_metrics", input={"promql": "up"})]),
             Message(role="user", content=[ToolResultBlock(tool_use_id="t1", content="{}")]),
         ]
-        key = build("deepseek-chat", messages).cache_key()
+        key = build("deepseek-v4-flash", messages).cache_key()
         self.assertEqual(len(key), 64)
 
     def test_error_flag_on_a_tool_result_changes_the_key(self):
@@ -140,14 +140,14 @@ class TestCacheKey(unittest.TestCase):
                 content=[ToolResultBlock(tool_use_id="t1", content="{}", is_error=True)],
             )
         ]
-        self.assertNotEqual(build("deepseek-chat", ok).cache_key(), build("deepseek-chat", bad).cache_key())
+        self.assertNotEqual(build("deepseek-v4-flash", ok).cache_key(), build("deepseek-v4-flash", bad).cache_key())
 
     def test_unknown_block_type_fails_loudly(self):
         class Weird:
             type = "future_block"
 
         with self.assertRaises(TypeError):
-            build("deepseek-chat", [Message(role="user", content=[Weird()])]).cache_key()
+            build("deepseek-v4-flash", [Message(role="user", content=[Weird()])]).cache_key()
 
 
 class TestCatalogInvariants(unittest.TestCase):
@@ -161,13 +161,13 @@ class TestCatalogInvariants(unittest.TestCase):
     def test_prices_are_marked_unverified(self):
         """Until L3-smoke checks them against a real call, any cost derived from
         them is reported as unverified rather than as measured fact."""
-        self.assertFalse(model("deepseek-chat").price.verified)
+        self.assertFalse(model("deepseek-v4-flash").price.verified)
 
     def test_only_anthropic_claims_explicit_cache_support(self):
         """The asymmetry that shapes request rendering: DeepSeek caches prefixes
         automatically, so it gets no markers — but still benefits from ordering."""
         self.assertTrue(model("claude-sonnet-5").supports_explicit_cache)
-        self.assertFalse(model("deepseek-chat").supports_explicit_cache)
+        self.assertFalse(model("deepseek-v4-flash").supports_explicit_cache)
 
 
 if __name__ == "__main__":

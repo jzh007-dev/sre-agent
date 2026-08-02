@@ -47,7 +47,7 @@ class RaisingClient:
         raise self.exc
 
 
-def _openai(model_id: str = "deepseek-chat", client=None) -> OpenAICompatAdapter:
+def _openai(model_id: str = "deepseek-v4-flash", client=None) -> OpenAICompatAdapter:
     spec = model(model_id)
     return OpenAICompatAdapter(
         provider_spec=PROVIDERS[spec.provider], model_spec=spec, client=client or NullClient()
@@ -83,9 +83,9 @@ class TestAnthropicCacheBreakpoints(unittest.TestCase):
         """DeepSeek caches its prefix automatically. Sending markers it does not
         understand risks a 400, and the ordering already does the work."""
         adapter = OpenAICompatAdapter(
-            provider_spec=PROVIDERS["deepseek"], model_spec=model("deepseek-chat"), client=NullClient()
+            provider_spec=PROVIDERS["deepseek"], model_spec=model("deepseek-v4-flash"), client=NullClient()
         )
-        payload = adapter.render(build("deepseek-chat", [], system=_layered()))
+        payload = adapter.render(build("deepseek-v4-flash", [], system=_layered()))
         self.assertNotIn("cache_control", json.dumps(payload))
         # ...but the layered ordering still reaches the provider.
         self.assertLess(
@@ -106,7 +106,7 @@ class TestOpenAICodec(unittest.TestCase):
                 ToolResultBlock(tool_use_id="t2", content="{}"),
             ],
         )
-        payload = _openai().render(build("deepseek-chat", [message]))
+        payload = _openai().render(build("deepseek-v4-flash", [message]))
         tool_messages = [m for m in payload["messages"] if m["role"] == "tool"]
         self.assertEqual([m["tool_call_id"] for m in tool_messages], ["t1", "t2"])
 
@@ -118,13 +118,13 @@ class TestOpenAICodec(unittest.TestCase):
                 ToolUseBlock(id="t1", name="query_metrics", input={"promql": "up"}),
             ],
         )
-        payload = _openai().render(build("deepseek-chat", [message]))
+        payload = _openai().render(build("deepseek-v4-flash", [message]))
         call = payload["messages"][0]["tool_calls"][0]
         self.assertEqual(call["function"]["name"], "query_metrics")
         self.assertEqual(json.loads(call["function"]["arguments"]), {"promql": "up"})
 
     def test_tools_are_rendered_in_function_shape(self):
-        payload = _openai().render(build("deepseek-chat", [], [TOOL]))
+        payload = _openai().render(build("deepseek-v4-flash", [], [TOOL]))
         self.assertEqual(payload["tools"][0]["type"], "function")
         self.assertEqual(payload["tools"][0]["function"]["parameters"], TOOL["input_schema"])
 
@@ -294,12 +294,12 @@ class TestClassification(unittest.IsolatedAsyncioTestCase):
     async def test_send_classifies_whatever_the_client_raises(self):
         adapter = _openai(client=RaisingClient(_make(503, "unavailable")))
         with self.assertRaises(errors.ServerError):
-            await adapter.send(build("deepseek-chat", []))
+            await adapter.send(build("deepseek-v4-flash", []))
 
     async def test_already_classified_errors_pass_through_unwrapped(self):
         adapter = _openai(client=RaisingClient(errors.RateLimit("429", status=429)))
         with self.assertRaises(errors.RateLimit):
-            await adapter.send(build("deepseek-chat", []))
+            await adapter.send(build("deepseek-v4-flash", []))
 
 
 def _make(status: int, message: str, headers: dict | None = None) -> Exception:
