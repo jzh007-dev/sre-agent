@@ -62,7 +62,8 @@ The LLM has **freedom of ordering, not freedom over resources or contracts**: it
 - **Agent shape**: 6-step deterministic harness + ReAct loop, no orchestration framework ([TRADEOFFS §22](./TRADEOFFS.md#22-agent-architecture-agent-loop-over-workflow-graph), [§23](./TRADEOFFS.md#23-harness-deterministic-pipeline-around-the-agent-loop-refines-22))
 - **Entry modes**: alert webhook (real) / chat / scheduled patrol — one `Investigation` type ([§25](./TRADEOFFS.md#25-trigger-registry-alert-is-one-entry-mode-of-three))
 - **LLM gateway**: routing by task nature, `cache_control` placement, cost accounting, budget enforcement, response cache, Langfuse tracing ([§3](./TRADEOFFS.md#3-llm-gateway-in-process-wrapper-not-litellmportkey-service))
-- **LLM providers**: DeepSeek / Qwen (DashScope) / Moonshot (Kimi) through one OpenAI-compat adapter; Anthropic as the different-family class required by the judge and reviewer designs
+- **LLM providers**: DeepSeek / Qwen (DashScope) / Moonshot (Kimi) through one OpenAI-compat adapter; Anthropic as the different-family class required by the judge and reviewer designs. Routing pins **concrete models, never provider aliases** — an alias breaks per-model pricing and silently invalidates eval's `model_version` key
+- **Cost accounting**: per billing currency, never converted; DeepSeek rates **verified against the account's own invoice** (`srectl prices` recomputes each billed day to ten decimal places)
 - **Integrations**: one YAML + one MCP server each — **zero Python per integration** ([§24](./TRADEOFFS.md#24-integrations-are-configuration-not-code))
 - **Tool layer**: MCP over stdio, split by side-effect class (read-only vs WRITE)
 - **Durability**: per-investigation JSONL append log; Temporal is out of scope, documented as a Tier 2 seam ([§32](./TRADEOFFS.md#32-temporal-is-out-of-scope-not-deferred))

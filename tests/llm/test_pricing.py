@@ -60,9 +60,25 @@ class TestPriceStaleness(unittest.TestCase):
         self.assertFalse(hasattr(price, "fx_to_usd"))
         self.assertFalse(hasattr(Cost(native=1.0, currency="CNY"), "usd"))
 
-    def test_catalogue_prices_are_currently_unverified(self):
-        self.assertFalse(model("deepseek-v4-flash").price.verified)
+    def test_deepseek_prices_are_verified_against_its_invoice(self):
+        """Verified by `srectl prices`, which recomputes each billed day from the
+        invoice's own per-token rates — see tests/llm/test_billing_csv.py. Stronger
+        than a documentation check: it measures what this account is charged."""
+        price = model("deepseek-v4-flash").price
+        self.assertTrue(price.verified)
+        self.assertEqual(price.currency, "CNY")
+
+    def test_providers_without_an_invoice_stay_unverified(self):
+        """Verification is per provider, not a global flag. Anthropic has no invoice
+        here, so its rates remain from memory and say so."""
+        self.assertFalse(model("claude-sonnet-5").price.verified)
         self.assertGreater(PRICE_TABLE_MAX_AGE_DAYS, 0)
+
+    def test_a_verified_table_still_ages_out(self):
+        """Verification is a point in time. Rates change on the provider's schedule,
+        so `verified` does not exempt a table from the staleness window."""
+        price = model("deepseek-v4-flash").price
+        self.assertTrue(price.is_stale("2099-01-01"))
 
 
 class TestLedgerProvenance(unittest.TestCase):

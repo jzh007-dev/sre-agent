@@ -158,10 +158,12 @@ class TestCatalogInvariants(unittest.TestCase):
             with self.subTest(model=model_id):
                 self.assertIn(spec.provider, PROVIDERS)
 
-    def test_prices_are_marked_unverified(self):
-        """Until L3-smoke checks them against a real call, any cost derived from
-        them is reported as unverified rather than as measured fact."""
-        self.assertFalse(model("deepseek-v4-flash").price.verified)
+    def test_verification_is_per_provider_not_global(self):
+        """DeepSeek's rates were checked against its own invoice; Anthropic's were
+        not, and the difference is visible in the catalogue rather than smoothed over
+        by a single project-wide flag."""
+        self.assertTrue(model("deepseek-v4-flash").price.verified)
+        self.assertFalse(model("claude-sonnet-5").price.verified)
 
     def test_only_anthropic_claims_explicit_cache_support(self):
         """The asymmetry that shapes request rendering: DeepSeek caches prefixes

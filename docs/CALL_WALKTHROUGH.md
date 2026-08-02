@@ -36,7 +36,7 @@ The rule the layout enforces: **`core/` never imports a concrete implementation.
 
 ## 1. Happy path — cache miss
 
-**预设**: `deepseek-chat` routed for `main_loop`; budget `{"USD": 0.40}`; response cache empty; breaker closed.
+**预设**: `deepseek-v4-flash` routed for `main_loop` (a concrete model — routing refuses the `deepseek-chat` alias); budget `{"CNY": 3.00}`; response cache empty; breaker closed.
 
 **情景**: `GS-RES-001-redis-oom` fires. First LLM turn.
 
@@ -50,13 +50,13 @@ The rule the layout enforces: **`core/` never imports a concrete implementation.
 | 4 | `request.py` | Orders fragments `[A]methodology [B]contract [C]integration [D]budget`; breakpoints after `[B]` and `[C]`; `cache_key()` = SHA-256 over model + system + messages + **tool schemas** + params |
 | 5 | `cache.py` | Miss. `misses += 1` |
 | 6 | `request.py` | `check_context()` — estimate ≤ 85% of 64 000. Passes |
-| 7 | `gateway.py` | Budget gate in **this provider's currency**: `0 < 0.40 USD`. A currency with no ceiling is refused, not treated as unbounded |
+| 7 | `gateway.py` | Budget gate in **this provider's currency**: `0 < 3.00 CNY`. A currency with no ceiling is refused, not treated as unbounded |
 | 8 | `transport.py` | Breaker closed → acquire semaphore (max 4) → `adapter.send()` |
 | 9 | `openai_compat.py` | Renders OpenAI payload — **no `cache_control`**, DeepSeek caches prefixes automatically. Parses reply; a response carrying tool calls becomes `TOOL_USE` regardless of `finish_reason` |
 | 10 | `usage.py` | `prompt_cache_hit_tokens` **subtracted from** `prompt_tokens`, or cached tokens would be billed at full rate |
 | 11 | `cache.py` / `cost.py` | Store response + `Cost`; ledger records `attempts=1` |
 
-**结果 (live)**: `in=1550 out=18 cache_read=0 cost=$0.000454`, one attempt, `TOOL_USE`.
+**结果 (live)**: `in=1550 out=18 cache_read=0 cost=0.001586 CNY`, one attempt, `TOOL_USE`.
 The loop dispatches the tool calls with `asyncio.gather`.
 
 *Tests*: `test_second_identical_call_is_served_from_cache`, `test_the_answer_never_reaches_the_first_message`
@@ -74,14 +74,22 @@ The loop dispatches the tool calls with `asyncio.gather`.
 **结果 (live)**:
 
 ```
-call 1: in=1550 out=18 cache_read=0     cost=$0.000454
-call 2: in=14   out=18 cache_read=1536  cost=$0.000067   ← 85% less
+call 1: in=1550 out=18 cache_read=0     cost=0.001586 CNY
+call 2: in=14   out=18 cache_read=1536  cost=0.000081 CNY   ← 94.9% less
 ```
+
+A cache hit costs **2% of a miss** on `deepseek-v4-flash` — 1.00 vs 0.02 CNY per 1M,
+[verified from the invoice](../TRADEOFFS.md#36-how-the-price-table-got-verified--and-what-verified-is-worth).
+On a warm call the cache saves several times what the call itself costs.
 
 This is the payoff of `request.py` ordering fragments most-static-first, and it
 happened on DeepSeek **with no explicit markers at all**. A design that treated
 prompt caching as an Anthropic feature would have got the ordering wrong here and
 lost the discount silently.
+
+The first figure reported for this was 85%, computed from a price table written from
+memory. The invoice put it at 94.9% — the guess was wrong in the *favourable*
+direction, which is the direction nobody questions.
 
 *Test*: `test_deepseek_cached_tokens_are_subtracted_from_input`
 
@@ -100,8 +108,8 @@ with `cached=True` and **replays the original `Cost`** rather than recomputing i
 
 ```
 calls: 2   cached_calls: 1
-money_spent:    {"USD": 0.000067}   ← what was paid
-budget_charged: {"USD": 0.000134}   ← what the ceiling saw
+money_spent:    {"CNY": 0.000081}   ← what was paid
+budget_charged: {"CNY": 0.000162}   ← what the ceiling saw
 ```
 
 Two totals, because they answer different questions. If a hit were also free of
@@ -185,7 +193,7 @@ because its accuracy belongs to neither model and its cost mixes two price sheet
 
 ## 7. Budget exhausted
 
-**预设**: `ToolBudget(max_cost={"USD": 0.10})`; already spent `$0.28`.
+**预设**: `ToolBudget(max_cost={"CNY": 1.00})`; already spent `1.00 CNY`.
 
 **过程**: cache miss → context check passes → **budget gate refuses** →
 `BudgetExceeded` → gateway does *not* try fallback (a ceiling is ours, not the
@@ -225,19 +233,22 @@ in `llm/protocol.py`, not a provider failure — W3 L6 catches it and compacts.
 
 ```json
 {
-  "calls": 2, "cached_calls": 1, "total_attempts": 3,
-  "money_spent": {"USD": 0.000133},
-  "budget_charged": {"USD": 0.000200},
-  "cache_savings": {"USD": 0.000774},
-  "by_kind": {"main_loop": {"USD": 0.000133}},
+  "calls": 2, "cached_calls": 0, "total_attempts": 2,
+  "money_spent":    {"CNY": 0.000623},
+  "budget_charged": {"CNY": 0.000623},
+  "cache_savings":  {"CNY": 0.003011},
+  "by_kind": {"main_loop": {"CNY": 0.000623}},
   "fell_back": false,
-  "currencies": ["USD"],
+  "currencies": ["CNY"],
   "mixed_currencies": false,
-  "prices_verified": false,
-  "price_table_versions": ["2026-08-02.unverified"],
+  "prices_verified": true,
+  "price_table_versions": ["2026-08-03.invoice-verified"],
   "mixed_price_tables": false
 }
 ```
+
+Note `cache_savings` exceeds `money_spent` by roughly 5x: on a cache-warm call the
+discount is worth several times the call itself.
 
 Four of these fields exist to keep the number honest rather than flattering:
 
@@ -246,22 +257,25 @@ Four of these fields exist to keep the number honest rather than flattering:
   scalar total: the agent bills in one currency and the judge in another, and those
   are separate lines rather than a sum. A conversion would add a continuously-moving
   second error source, and would make a wrong rate look identical to a price change.
-- **`prices_verified: false`** — the rates were written from memory and the docs site
-  is unreachable from this environment. Every figure above is arithmetic-correct and
-  rate-unconfirmed, and says so.
+- **`prices_verified: true`** — but per provider, not globally. DeepSeek's rates were
+  read off its own invoice and cross-checked by recomputing three days of charges to
+  ten decimal places; Anthropic's are still from memory and still say so. The flag was
+  `false` for a day, and the ledger said so on every line rather than rounding it off.
 - **`mixed_price_tables`** — a run spanning a price edit would be summing two rate
   sets into a number that is a cost at neither.
 - **`mixed_currencies`** — a run spanning two billing currencies (only possible via
   fallback, which is already tagged) cannot be summed, and says so.
 
-And reconciliation closes the loop: **compare the provider's own balance delta
-against what the table predicted, in the same currency.** No exchange rate
-participates, which is what makes the check able to answer its own question.
+And two mechanisms close the loop on price drift:
 
-Currently DeepSeek's table is USD-denominated against a CNY balance, so the verdict
-is **`not_comparable`** — deliberately not a converted guess. Recording the rates in
-CNY switches it on.
+**`srectl prices`** reads the provider's billing export, derives the rates from its
+per-token `price` column, self-checks by recomputing each billed day, and then reports
+where the catalogue disagrees. This is the authority — it measures what this account is
+actually charged, per model *and per API key*. The last part matters: a second key on
+the same account moved the balance during this work, which is why a balance delta
+cannot be attributed to one project and an invoice line can.
 
-Below `0.35 CNY` of spend it returns `inconclusive` rather than a ratio: the balance
-has 2-decimal resolution and a single call costs a tiny fraction of that. It is a
-batch instrument, sized for an eval run.
+**`srectl smoke`** does the crude live version against the balance endpoint. Below
+`0.35 CNY` of spend it returns `inconclusive` rather than a ratio — the balance has
+2-decimal resolution and one call costs a tiny fraction of that. It is a batch
+instrument, sized for an eval run.

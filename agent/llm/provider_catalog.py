@@ -92,35 +92,54 @@ PROVIDERS: dict[str, ProviderSpec] = {
     ),
 }
 
-# Prices are placeholders pending verification against each provider's published
-# pricing — see `usage.PRICE_TABLE_VERSION`. They are functional (accounting runs,
-# relative comparisons hold) but any figure derived from them is reported as
-# unverified rather than as measured fact.
+# DeepSeek's rates are **verified from the account's own invoice** (billing CSV
+# export, 2026-08-03) rather than from a pricing page, and cross-checked by
+# recomputing each day's charge from the per-token rates: three days reproduced the
+# billed total exactly to ten decimal places. That is a stronger verification than
+# reading documentation, because it measures what this account is actually charged —
+# including any account-specific tiering. See `billing_csv.py`.
 #
-# Two separate problems are flagged here, and the second is the worse one:
-#   1. the rates were written from memory and are unverified;
-#   2. DeepSeek's live `/models` returns `deepseek-v4-flash` and `deepseek-v4-pro`,
-#      and a request for `deepseek-chat` is *served by* `deepseek-v4-flash`. So the
-#      rates below were also attached to the wrong thing — an alias, not a model.
-#      The concrete ids are catalogued and the aliases are marked; routing refuses
-#      an alias so this cannot recur silently.
-# DeepSeek bills in CNY, so its rates should be recorded in CNY once checked; the
-# USD figures below are carried over from the alias entries and are certainly wrong
-# for v4. `srectl smoke` reports `not_comparable` until that is fixed, by design.
+# What is verified: the rates and the currency. What is **not**: the context windows,
+# which no endpoint reports and which are still carried over from the aliases.
+#
+# Note DeepSeek has no cache-*write* premium — a miss simply costs the miss rate and
+# populates the cache. `cache_write` is therefore pinned equal to `input` rather than
+# left to the 1.25x default, which is an Anthropic convention and would invent a
+# charge that does not exist here.
+#
+# Every other provider below is still unverified, from memory, and says so.
+_DEEPSEEK_VERIFIED = "2026-08-03.invoice-verified"
+
 MODELS: dict[str, ModelSpec] = {
     "deepseek-v4-flash": ModelSpec(
         id="deepseek-v4-flash",
         provider="deepseek",
-        context_window=64_000,
-        price=Price(input=0.28, output=1.10, cache_read=0.028),
+        context_window=64_000,  # unverified — no endpoint reports it
+        price=Price(
+            input=1.00,
+            output=2.00,
+            cache_read=0.02,  # 2% of the miss rate: a 98% discount on a cache hit
+            cache_write=1.00,  # no write premium; a miss populates the cache
+            currency="CNY",
+            as_of=_DEEPSEEK_VERIFIED,
+            verified=True,
+        ),
         tier="workhorse",
         supports_explicit_cache=False,  # caches prefixes automatically
     ),
     "deepseek-v4-pro": ModelSpec(
         id="deepseek-v4-pro",
         provider="deepseek",
-        context_window=64_000,
-        price=Price(input=0.55, output=2.19),
+        context_window=64_000,  # unverified
+        price=Price(
+            input=3.00,
+            output=6.00,
+            cache_read=0.025,
+            cache_write=3.00,
+            currency="CNY",
+            as_of=_DEEPSEEK_VERIFIED,
+            verified=True,
+        ),
         tier="strong",
         supports_explicit_cache=False,
     ),
@@ -129,7 +148,7 @@ MODELS: dict[str, ModelSpec] = {
         id="deepseek-chat",
         provider="deepseek",
         context_window=64_000,
-        price=Price(input=0.28, output=1.10, cache_read=0.028),
+        price=Price(input=1.00, output=2.00, cache_read=0.02, currency="CNY"),
         tier="workhorse",
         alias_of="deepseek-v4-flash",
     ),
@@ -137,7 +156,7 @@ MODELS: dict[str, ModelSpec] = {
         id="deepseek-reasoner",
         provider="deepseek",
         context_window=64_000,
-        price=Price(input=0.55, output=2.19),
+        price=Price(input=3.00, output=6.00, cache_read=0.025, currency="CNY"),
         tier="strong",
         alias_of="deepseek-v4-pro",
     ),
