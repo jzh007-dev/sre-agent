@@ -462,6 +462,54 @@ Format for each entry:
 - **Cost**: no crash-resume demo, and no signal-based human approval primitive — so W6's gate uses a structured tool call plus an external API instead, as [§22](#22-agent-architecture-agent-loop-over-workflow-graph) already anticipated.
 - **Reconsider when**: p99 investigation duration exceeds ~30 minutes, or a human approval step needs to survive a process restart.
 
+## 33. Gateway layering: four layers plus three cross-cutting decorators
+
+- **Decision**: the gateway is decomposed into **routing → construction → transport**, with a **shared** codec layer used by all of them, and three cross-cutting concerns implemented as decorators rather than as a further layer: **response cache**, **budget gate**, **tracing**.
+
+```
+        ┌──────────── tracing (wraps everything) ─────────────┐
+        │  ┌────────── response cache (wraps transport) ────┐ │
+routing ─→ construction ─→ │ budget gate ─→ transport │ ─→ parse │
+        │  └────────────────────────────────────────────────┘ │
+        └── shared: domain types + per-provider codec ────────┘
+             (used outbound by construction, inbound by parse)
+```
+
+- **Origin**: proposed as four layers — routing (pick the model by capability), construction (provider config, parameterised), transport (cost accounting, rate limiting, retry, error classification and the action each error implies), shared (message-format compatibility). That decomposition was adopted; the record below is the set of deltas applied to it, kept because each one is a decision someone will otherwise re-litigate.
+
+| # | Delta from the original proposal | Reasoning |
+|---|---|---|
+| 1 | **Shared is cross-cutting, not the bottom layer.** | Message translation runs twice per call — outbound when construction builds the request, inbound when the response is parsed. It is a bidirectional codec, not a stage. Listing it fourth invites reading it as "beneath transport", which would put response parsing in the wrong place. |
+| 2 | **Cache, budget gate and tracing are decorators, not a fifth layer.** | A cache *hit* means transport never runs, so the cache cannot be a stage inside transport; it wraps it. Same for tracing (spans the whole call) and the budget gate (a guard immediately before transport). |
+| 3 | **The budget gate sits *after* the cache lookup, and a cache hit still charges the budget.** | A cached call costs no money, so gating before the cache would refuse free calls. But if cache hits were also free of *budget*, a run that degraded on budget exhaustion would stop degrading on rerun — breaking [EVAL.md](./EVAL.md) reproducibility. The resolution: the cache entry stores the original call's usage and cost, and a hit replays that charge. Money is genuinely saved; the ledger stays faithful; budget-driven degradation reproduces. Two numbers are therefore reported, `money_spent_usd` (excludes hits) and `budget_charged_usd` (includes them). |
+| 4 | **`cache_control` breakpoint placement is construction's job.** | The original construction layer was scoped to "register provider config", which left the single highest-leverage cost item in [§3](#3-llm-gateway-in-process-wrapper-not-litellmportkey-service) — 60-70% of input tokens — with no owner. Construction owns *request assembly*, of which breakpoint placement is part. Note the provider asymmetry: Anthropic needs explicit markers, DeepSeek caches its prefix automatically, and **prompt-layer ordering pays off on both** — only one needs the annotation. |
+| 5 | **Streaming belongs in transport, and it is not optional.** | Absent from the original layer list. L2 deliberately shaped `TextDelta` as a delta so the gateway could stream later; without it the two-stage output (W3 L8) and chat mode cannot exist. |
+| 6 | **Error classification is the *precondition* for the circuit breaker, not a sibling feature.** | The proposal was "open the breaker after 3 failed retries". But a malformed request fails three times while the provider is perfectly healthy — that would open the breaker and force an unnecessary fallback. Only *retryable* classes count toward the breaker, and the threshold is **3 consecutive retryable failures**, not "3 retries of one call". Detection is provider-specific and lives in the adapter; policy is provider-agnostic and lives in transport. |
+| 7 | **429 retries but never counts toward the breaker.** | Rate limiting is a quota condition, not an outage. Opening the breaker on 429 would fall back to another provider and thereby *hide* a quota misconfiguration. Retries exhaust, the call fails, and the failure is visible. |
+| 8 | **SDK-level retries are switched off (`max_retries=0`).** | Both the `anthropic` and `openai` SDKs retry by default. Layering our 3 attempts on top of theirs is 9 requests to a dying provider, and it makes the retry count unreadable. Owning it entirely makes it one legible number. |
+| 9 | **Cross-provider fallback is disabled in eval.** | The most consequential delta. If a provider 529s mid-investigation and the run continues on another, that run's accuracy is attributable to neither model, its cost mixes two price sheets, and the eval matrix's `model_version` dimension becomes a lie. Mid-run switching is additionally risky because `messages` was built under the first model's tool-use idiosyncrasies. So: **fallback is a production feature**, eval pins the provider, and any real run that fell back is tagged and excluded from model comparison. |
+| 10 | **Routing keys on a concrete `CallKind`, and the family-difference rule is validated at wiring time.** | "Select by capability need" needed a definition or it becomes taste. `CallKind ∈ {main_loop, refute, judge, reviewer, classify}` maps to hard requirements (tool-use support, minimum context, family) and soft preferences (tier, cost). For `judge` and `reviewer`, *family must differ from the agent's* — that is a correctness requirement from [EVAL.md](./EVAL.md) and [SECURITY.md](./SECURITY.md) L3, not a preference, so a configuration that violates it fails at construction rather than at the first judged run. |
+| 11 | **Rate limiting is justified by eval throughput, not production load.** | At under 1 QPS in production it is nearly moot; running 30 golden cases concurrently will certainly hit 429. That reframing determines the implementation: a per-provider semaphore plus 429 backoff is sufficient, and a token bucket would be theatre. |
+| 12 | **The gateway binds the investigation at construction instead of changing the `LLM` protocol.** | Cost attribution and budget enforcement need to know which investigation a call belongs to, but the protocol is `call(messages, tools)`. Rather than growing the signature — which would leak accounting into the kernel — `gateway.bind(inv, kind)` returns an object implementing `LLM`. The loop keeps seeing a plain `LLM` and the seam rule is untouched. |
+| 13 | **`BudgetExceeded` and `ProviderUnavailable` live in `llm/protocol.py`.** | They are part of the protocol's contract rather than provider details, so `core/loop.py` may import them under the seam rule, and the loop converts them into `Aborted` events. This preserves the L2 invariant that every run emits exactly one `Done` or `Aborted`. Provider-specific errors never reach the loop. |
+
+- **Cost**: more files than a single `gateway.py`. Accepted because the layer boundaries are the interview content, and because each layer is separately testable — the transport policy paths (retry, breaker, classification) are all exercised offline with an injected send function and no network.
+- **Reconsider when**: a fifth genuine stage appears. Candidates that would qualify: request batching, or a semantic (rather than exact-hash) cache.
+
+## 34. LiteLLM: not adopted, kept as a documented swap-in
+
+- **Decision**: write the gateway; do not take LiteLLM. `LiteLLMAdapter` is left as a legal implementation of the existing `LLM` protocol, with a written threshold for when to switch.
+- **Alternatives**:
+  - (A) Adopt LiteLLM for the transport layer — it ships retry, cross-provider fallback, error normalisation, streaming normalisation, and a price map.
+  - (B) Adopt the LiteLLM proxy as a separate service.
+- **Why not**:
+  1. **It replaces the ~40% of the transport layer that is plumbing, and none of the four responsibilities that carry this project's argument.** `cache_control` breakpoint placement, per-investigation budget with refuse-on-exceed, a response cache that replays cost for reproducibility, and routing by task nature are all still ours to write. The saving is roughly 150 lines of provider plumbing.
+  2. **Its value scales with provider count, and ours is two adapter classes.** `OpenAICompatLLM` covers DeepSeek / Qwen / Kimi through `base_url` alone; Anthropic needs one native class. Importing a large, fast-moving dependency to save 150 lines is a poor trade at that scale.
+  3. **Its price map is approximate and lags provider changes.** For a project whose stated thesis is measured cost, an approximate price table undermines the claim — we would be reconciling against provider usage reporting regardless.
+- **Conceded in its favour**: normalising error taxonomies across providers is genuinely fiddly and LiteLLM has already done it. With two adapters and seven error classes it is about a day of work here — and that day produces the error-classification table, which is itself the artifact worth having.
+- **Cost**: we own the maintenance when a provider changes its error shapes or adds a caching mechanism.
+- **Reconsider when**: provider count passes ~6; or a non-standard endpoint (Azure, Vertex) is needed; or load balancing across multiple API keys per provider is needed. Because the `LLM` protocol already exists, the swap is one new file and a wiring change.
+
 ---
 
 ## Meta-decisions

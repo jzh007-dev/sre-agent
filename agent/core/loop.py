@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncIterator, Mapping, Sequence
 
-from ..llm.protocol import LLM
+from ..llm.protocol import LLM, BudgetExceeded, ProviderUnavailable
 from ..llm.types import ContentBlock, Message, StopReason, TextBlock, ToolUseBlock
 from ..tools.dispatch import safe_dispatch
 from ..tools.protocol import Tool, tool_schemas
@@ -57,7 +57,21 @@ async def run(
 
         yield TurnStarted(turn=inv.turn)
 
-        response = await llm.call(inv.messages, tools=schemas)
+        try:
+            response = await llm.call(inv.messages, tools=schemas)
+        except BudgetExceeded as exc:
+            # The gateway refused the call rather than truncating it. Everything
+            # gathered so far is still on `inv.messages`, so the harness can emit a
+            # partial report naming the ceiling that stopped the investigation.
+            yield Aborted("budget", str(exc))
+            return
+        except ProviderUnavailable as exc:
+            # Every candidate failed, or the breaker is open and fallback is off
+            # (which is the eval wiring). Not a tool failure and not recoverable
+            # here — retry, backoff and fallback all already happened below.
+            yield Aborted("provider_unavailable", str(exc))
+            return
+
         inv.messages.append(Message(role="assistant", content=list(response.content)))
 
         for block in response.content:

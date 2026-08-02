@@ -1,0 +1,108 @@
+"""Token usage and cost — shared layer.
+
+[EVAL.md](../../EVAL.md) names the gateway as the sole source of `cost_usd`, so
+this module is where a headline number in the project's own reporting comes from.
+That imposes a discipline the rest of the codebase does not need: **a cost figure
+must say which price table produced it.**
+
+Provider price sheets change, and any table checked into a repository starts
+going stale the day it is written. Rather than pretend otherwise, every `Price`
+carries an `as_of` date and a `verified` flag, and every ledger entry records the
+table version it was priced with. A cost reported from an unverified table is
+labelled as such in eval output instead of being presented as measured fact.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+#: Bumped whenever any price below changes. Stamped onto every ledger entry and
+#: every cache entry, so a cost number stays attributable after a price edit.
+PRICE_TABLE_VERSION = "2026-08-02.unverified"
+
+
+@dataclass(frozen=True)
+class Usage:
+    """Normalised token counts.
+
+    Providers disagree on field names and on whether cached input tokens are
+    included in the input count. Each adapter is responsible for normalising to
+    this shape — `input_tokens` here always means *tokens billed at the input
+    rate*, with cached reads and writes broken out separately.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    #: Tokens written into the provider's prompt cache (billed at a premium).
+    cache_write_tokens: int = 0
+    #: Tokens served from the provider's prompt cache (billed at a discount).
+    cache_read_tokens: int = 0
+
+    def __add__(self, other: Usage) -> Usage:
+        return Usage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+        )
+
+    @property
+    def total(self) -> int:
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_write_tokens
+            + self.cache_read_tokens
+        )
+
+
+@dataclass(frozen=True)
+class Price:
+    """USD per 1M tokens.
+
+    `cache_write` and `cache_read` default to the ratios the major providers
+    converge on (writes at 1.25x input, reads at 0.1x input). A provider that
+    differs states its own numbers; a provider with no prompt cache leaves them
+    at their defaults and simply never reports cache tokens.
+    """
+
+    input: float
+    output: float
+    cache_write: float | None = None
+    cache_read: float | None = None
+    as_of: str = PRICE_TABLE_VERSION
+    #: False until checked against the provider's published pricing. Propagates
+    #: into eval output so an unverified figure is never reported as measured.
+    verified: bool = False
+
+    @property
+    def cache_write_rate(self) -> float:
+        return self.cache_write if self.cache_write is not None else self.input * 1.25
+
+    @property
+    def cache_read_rate(self) -> float:
+        return self.cache_read if self.cache_read is not None else self.input * 0.1
+
+
+def cost_of(usage: Usage, price: Price) -> float:
+    """Cost in USD for one call."""
+    per_token = 1_000_000.0
+    return (
+        usage.input_tokens * price.input
+        + usage.output_tokens * price.output
+        + usage.cache_write_tokens * price.cache_write_rate
+        + usage.cache_read_tokens * price.cache_read_rate
+    ) / per_token
+
+
+def cache_savings(usage: Usage, price: Price) -> float:
+    """What the prompt cache saved on this call, versus paying full input rate.
+
+    Reported because `cache_control` breakpoint placement is claimed to be the
+    single highest-leverage cost decision in the gateway ([TRADEOFFS §3](../../TRADEOFFS.md#3-llm-gateway-in-process-wrapper-not-litellmportkey-service)).
+    A claim like that needs a number attached, and this is the number.
+    """
+    if not usage.cache_read_tokens:
+        return 0.0
+    full = usage.cache_read_tokens * price.input
+    discounted = usage.cache_read_tokens * price.cache_read_rate
+    return (full - discounted) / 1_000_000.0
