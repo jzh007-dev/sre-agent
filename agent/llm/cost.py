@@ -1,6 +1,6 @@
 """Cost ledger — per-investigation accounting.
 
-[EVAL.md](../../EVAL.md) names the gateway as the sole source of `cost_usd`, so
+[EVAL.md](../../EVAL.md) names the gateway as the sole source of cost, so
 this is where one of the project's headline numbers is produced. Two properties
 follow from that, and both exist to keep the number honest rather than flattering.
 
@@ -8,24 +8,23 @@ follow from that, and both exist to keep the number honest rather than flatterin
 (see `cache.py` and [TRADEOFFS §33](../../TRADEOFFS.md#33-gateway-layering-four-layers-plus-three-cross-cutting-decorators)
 delta 3), so the ledger reports:
 
-- `money_spent_usd` — what was actually paid. This is what eval reports as cost.
-- `budget_charged_usd` — what the ceiling was measured against, hits included.
-  This is what makes budget-driven degradation reproduce on a rerun.
+- `money_spent` — what was actually paid. This is what eval reports as cost.
+- `budget_charged` — what the ceiling was measured against, hits included. This is
+  what makes budget-driven degradation reproduce on a rerun.
 
 Reporting one number for both would mean either overstating spend or losing
 reproducibility.
+
+**Both are per currency, and there is no conversion.** Costs are reported in whatever
+each provider bills in. That means no single scalar total across providers billing
+differently — which turns out not to be needed, because the agent runs on one
+provider and the judge on another, and those are separate lines in `by_kind` rather
+than a sum. See `usage.Cost` for why a conversion would be actively harmful.
 
 **Provenance on every entry.** Each entry records the price table version it was
 costed with, and whether that table was verified against published pricing. A
 total computed from unverified prices is reported as unverified, not as measured.
 
-**Native currency is the record; USD is a view.** Exchange rates move continuously,
-so a cost stored only in USD silently depends on whatever rate applied when it was
-written, and cannot be corrected because the original amount is gone. Entries hold
-a `Cost` carrying both, with the native amount authoritative — see `usage.Cost`.
-Budget ceilings stay in USD because a ceiling has to be one comparable unit across
-providers; that is a policy number, and being approximate is acceptable for it in a
-way it is not for a record of spend.
 """
 from __future__ import annotations
 
@@ -41,7 +40,7 @@ class CostEntry:
     model_id: str
     provider: str
     usage: Usage
-    #: Authoritative in the provider's billing currency; `.usd` is the derived view.
+    #: In the provider's billing currency. Never converted.
     cost: Cost
     cached: bool = False
     #: Attempts consumed in transport. >1 means retries happened, which is one of
@@ -53,12 +52,7 @@ class CostEntry:
     #: The date past which this entry's price table should be re-checked. Carried on
     #: the entry so a historical cost stays interpretable after the table moves on.
     price_stale_after: str = ""
-    cache_savings_usd: float = 0.0
-
-    @property
-    def cost_usd(self) -> float:
-        """Derived USD view. Reporting only — never the record of what was billed."""
-        return self.cost.usd
+    cache_savings: Cost = field(default_factory=lambda: Cost(native=0.0))
 
     @property
     def currency(self) -> str:
@@ -103,37 +97,40 @@ class Ledger:
             price_table_version=price.as_of,
             price_verified=price.verified,
             price_stale_after=price.stale_after,
-            cache_savings_usd=cache_savings(usage, price),
+            cache_savings=cache_savings(usage, price),
         )
         self.entries.append(entry)
         return entry
 
     @property
-    def money_spent_native(self) -> dict[str, float]:
-        """What was actually paid, **per billing currency** — cache hits excluded.
+    def money_spent(self) -> dict[str, float]:
+        """What was actually paid, per billing currency — cache hits excluded.
 
-        This is the authoritative figure: it is what the providers will invoice, and
-        it never needs restating when exchange rates move. A dict rather than a
-        scalar because two providers may bill in different currencies, and adding
-        those together would produce a number that is a cost in neither.
+        A dict rather than a scalar because two providers may bill differently, and
+        adding those amounts would produce a number that is a cost in neither.
         """
+        return self._totals(include_cached=False)
+
+    @property
+    def budget_charged(self) -> dict[str, float]:
+        """What the ceiling is measured against, per currency — cache hits included,
+        so a run that degraded on budget degrades identically on rerun."""
+        return self._totals(include_cached=True)
+
+    def _totals(self, *, include_cached: bool) -> dict[str, float]:
         totals: dict[str, float] = defaultdict(float)
         for entry in self.entries:
-            if not entry.cached:
+            if include_cached or not entry.cached:
                 totals[entry.currency] += entry.cost.native
         return dict(totals)
 
-    @property
-    def money_spent_usd(self) -> float:
-        """Derived USD view — cache hits excluded. What eval reports, because a
-        single comparable unit is needed across providers."""
-        return sum(e.cost_usd for e in self.entries if not e.cached)
+    def spent_in(self, currency: str) -> float:
+        """Budget-charged amount in one currency. What the gateway's gate compares."""
+        return self.budget_charged.get(currency, 0.0)
 
     @property
-    def budget_charged_usd(self) -> float:
-        """What the ceiling is measured against — cache hits included, so that a
-        run which degraded on budget degrades identically on rerun."""
-        return sum(e.cost_usd for e in self.entries)
+    def currencies(self) -> set[str]:
+        return {e.currency for e in self.entries}
 
     @property
     def usage_total(self) -> Usage:
@@ -184,14 +181,19 @@ class Ledger:
         quietly."""
         return {e.price_table_version for e in self.entries}
 
-    def by_kind(self) -> dict[str, float]:
-        """Money by `CallKind`. The breakdown the interview checklist asks for
-        ("main loop $A, refute $B, judge $C")."""
-        out: dict[str, float] = defaultdict(float)
+    def by_kind(self) -> dict[str, dict[str, float]]:
+        """Money by `CallKind`, then by currency. The breakdown the interview
+        checklist asks for ("main loop A, refute B, judge C").
+
+        Nested rather than flat because the judge deliberately runs on a different
+        provider family than the agent, and that provider may bill in a different
+        currency. Flattening would require the conversion this design removed.
+        """
+        out: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         for entry in self.entries:
             if not entry.cached:
-                out[entry.kind] += entry.cost_usd
-        return dict(out)
+                out[entry.kind][entry.currency] += entry.cost.native
+        return {kind: dict(by_ccy) for kind, by_ccy in out.items()}
 
     def summary(self) -> dict[str, object]:
         """One flat dict for the trace, the JSONL log, and eval metrics."""
@@ -200,17 +202,28 @@ class Ledger:
             "calls": self.calls,
             "cached_calls": self.cached_calls,
             "total_attempts": self.total_attempts,
-            "money_spent_native": {c: round(v, 6) for c, v in self.money_spent_native.items()},
-            "money_spent_usd": round(self.money_spent_usd, 6),
-            "budget_charged_usd": round(self.budget_charged_usd, 6),
-            "cache_savings_usd": round(sum(e.cache_savings_usd for e in self.entries), 6),
-            "by_kind": {k: round(v, 6) for k, v in self.by_kind().items()},
+            "money_spent": {c: round(v, 6) for c, v in self.money_spent.items()},
+            "budget_charged": {c: round(v, 6) for c, v in self.budget_charged.items()},
+            "cache_savings": {
+                c: round(v, 6) for c, v in self._savings_by_currency().items()
+            },
+            "by_kind": {
+                kind: {c: round(v, 6) for c, v in by_ccy.items()}
+                for kind, by_ccy in self.by_kind().items()
+            },
             "input_tokens": self.usage_total.input_tokens,
             "output_tokens": self.usage_total.output_tokens,
             "cache_read_tokens": self.usage_total.cache_read_tokens,
             "fell_back": self.fell_back,
-            "fx_rates_used": sorted({f"{e.currency}@{e.cost.fx_to_usd}" for e in self.entries}),
+            "currencies": sorted(self.currencies),
+            "mixed_currencies": len(self.currencies) > 1,
             "prices_verified": self.fully_verified_prices,
             "price_table_versions": sorted(self.price_table_versions),
             "mixed_price_tables": len(self.price_table_versions) > 1,
         }
+
+    def _savings_by_currency(self) -> dict[str, float]:
+        totals: dict[str, float] = defaultdict(float)
+        for entry in self.entries:
+            totals[entry.cache_savings.currency] += entry.cache_savings.native
+        return dict(totals)

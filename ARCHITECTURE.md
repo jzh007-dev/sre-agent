@@ -265,7 +265,7 @@ Not a separate service. `agent/llm/gateway.py` is the single chokepoint every LL
 |---|---|
 | **Routing** by task nature (loop / refute / judge) | the SDK doesn't know what kind of call this is |
 | **`cache_control` breakpoint placement** | the SDK never decides where the cache prefix ends; placed right this saves 60-70% of input tokens, placed wrong it saves nothing |
-| **Cost accounting** per call → per investigation | [EVAL.md](./EVAL.md) names the gateway as the sole source of `cost_usd` |
+| **Cost accounting** per call → per investigation, **per currency, never converted** | [EVAL.md](./EVAL.md) names the gateway as the sole source of cost; an exchange rate would make a wrong rate indistinguishable from a price change ([§35](./TRADEOFFS.md#35-price-drift-freeze-history-flag-age-reconcile-against-billing)) |
 | **Budget enforcement** — refuse the call when the ceiling is hit | turns `p99 cost < $0.40` from aspiration into mechanism; the harness then degrades instead of burning |
 | **Response cache** keyed `(model, prompt_hash)` | the only way EVAL.md's reproducibility principle is physically achievable, and what makes nightly eval affordable |
 | **Tracing** tagged `prompt_version` / `model_version` | required by EVAL.md's version matrix |

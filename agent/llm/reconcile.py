@@ -7,8 +7,8 @@ a manual step that will be skipped; reconciling against the provider's own billi
 is automatic.
 
 **How it works.** Snapshot the account balance, run some work, snapshot again. The
-delta is what the provider actually charged. Compare it to `Ledger.money_spent_usd`,
-which is what our table *predicted*. Divergence beyond tolerance means the table is
+delta is what the provider actually charged. Compare it to `Ledger.money_spent` in
+the same currency, which is what our table *predicted*. Divergence beyond tolerance means the table is
 stale — and the ratio tells you roughly by how much.
 
 **The resolution floor is real and worth stating.** DeepSeek reports balance to two
@@ -18,14 +18,16 @@ run over ~30 cases is comfortably above the floor. This is a *batch* instrument,
 and `min_spend_usd` refuses to draw a conclusion below it rather than reporting
 noise as a finding.
 
-**Currency, and why the ledger now holds native amounts.** The balance arrives in
-the provider's billing currency. If the ledger only held USD, this comparison would
-need an FX conversion — and then a wrong exchange rate and a real price change would
-produce *the same signal*, making the check unable to answer the question it exists
-for. Because `Cost` keeps the native amount authoritative, the common case compares
-**CNY against CNY and FX drops out entirely**. Conversion happens only when the
-price table is denominated differently from the balance, and that case is flagged in
-the output as a weaker result rather than reported identically.
+**Currency: same-currency only, by construction.** The balance arrives in the
+provider's billing currency and the ledger records costs in that same currency, so
+this compares CNY against CNY and **no exchange rate participates at all**. That is
+what makes the check able to answer its own question: with a conversion in the
+middle, a wrong rate and a real price change produce the same signal.
+
+If the price table is denominated differently from the balance, this does **not**
+convert and guess — it returns `not_comparable` and says to denominate the table in
+the billing currency. A weaker answer dressed up as a real one would be worse than
+no answer.
 """
 from __future__ import annotations
 
@@ -38,8 +40,10 @@ from typing import Protocol
 from .credentials import api_key
 from .provider_catalog import PROVIDERS
 
-#: Below this, the balance endpoint's rounding dominates and no conclusion is drawn.
-DEFAULT_MIN_SPEND_USD = 0.05
+#: Below this (in the billing currency), the balance endpoint's rounding dominates
+#: and no conclusion is drawn. DeepSeek reports 2dp of CNY, so ~0.35 CNY is the point
+#: at which a delta is more signal than rounding.
+DEFAULT_MIN_SPEND = 0.35
 
 #: Fractional disagreement tolerated before the table is called into question.
 #: Generous on purpose: rounding, FX drift, and concurrent use of the same account
@@ -102,61 +106,46 @@ class Reconciliation:
     """The verdict of one before/after comparison."""
 
     provider: str
-    #: Currency the *balance* is reported in.
+    #: Currency the *balance* is reported in — and the only currency compared.
     currency: str
     balance_before: float
     balance_after: float
-    fx_to_usd: float
-    predicted_usd: float
-    #: What the ledger predicted in the price table's own currency, when that
-    #: currency matches the balance's. Present means FX is not involved in the
-    #: comparison at all, which is the stronger result.
-    predicted_native: float | None = None
-    #: Currency of `predicted_native`.
-    predicted_currency: str = ""
-    min_spend_usd: float = DEFAULT_MIN_SPEND_USD
+    #: What the ledger predicted, in `predicted_currency`.
+    predicted: float
+    predicted_currency: str
+    min_spend: float = DEFAULT_MIN_SPEND
     tolerance: float = DEFAULT_TOLERANCE
     notes: list[str] = field(default_factory=list)
 
     @property
-    def charged_native(self) -> float:
+    def charged(self) -> float:
         return self.balance_before - self.balance_after
 
     @property
-    def charged_usd(self) -> float:
-        return self.charged_native * self.fx_to_usd
+    def comparable(self) -> bool:
+        """Whether prediction and charge are in the same currency.
 
-    @property
-    def compares_natively(self) -> bool:
-        """True when the prediction and the charge are in the same currency.
-
-        The stronger comparison: no exchange rate participates, so a divergence can
-        only mean the rates are wrong (or another workload shares the account).
+        No conversion is attempted when they are not: an exchange rate would make a
+        wrong rate look exactly like a price change.
         """
-        return self.predicted_native is not None and self.predicted_currency == self.currency
+        return self.predicted_currency == self.currency
 
     @property
     def below_resolution(self) -> bool:
         """Whether the spend was too small for the balance endpoint to resolve."""
-        return max(self.charged_usd, self.predicted_usd) < self.min_spend_usd
+        return max(self.charged, self.predicted) < self.min_spend
 
     @property
     def ratio(self) -> float | None:
-        """Actual / predicted. >1 means we are under-reporting cost.
-
-        Computed natively when possible so no FX error can masquerade as drift.
-        """
-        if self.compares_natively:
-            assert self.predicted_native is not None
-            if self.predicted_native <= 0:
-                return None
-            return self.charged_native / self.predicted_native
-        if self.predicted_usd <= 0:
+        """Actual / predicted. >1 means we are under-reporting cost."""
+        if not self.comparable or self.predicted <= 0:
             return None
-        return self.charged_usd / self.predicted_usd
+        return self.charged / self.predicted
 
     @property
     def verdict(self) -> str:
+        if not self.comparable:
+            return "not_comparable"
         if self.below_resolution:
             return "inconclusive"
         ratio = self.ratio
@@ -170,53 +159,44 @@ class Reconciliation:
         return {
             "provider": self.provider,
             "verdict": self.verdict,
-            "compares_natively": self.compares_natively,
-            "charged_native": round(self.charged_native, 4),
             "currency": self.currency,
-            "predicted_native": (
-                None if self.predicted_native is None else round(self.predicted_native, 6)
-            ),
+            "charged": round(self.charged, 4),
+            "predicted": round(self.predicted, 6),
             "predicted_currency": self.predicted_currency,
-            "fx_to_usd": self.fx_to_usd,
-            "charged_usd": round(self.charged_usd, 6),
-            "predicted_usd": round(self.predicted_usd, 6),
             "ratio": None if self.ratio is None else round(self.ratio, 3),
             "tolerance": self.tolerance,
-            "min_spend_usd": self.min_spend_usd,
+            "min_spend": self.min_spend,
             "notes": self.notes,
         }
 
     def explain(self) -> str:
+        if self.verdict == "not_comparable":
+            return (
+                f"not comparable: {self.provider} bills in {self.currency} but the "
+                f"price table is denominated in {self.predicted_currency or 'nothing'}. "
+                f"Deliberately not converted — an exchange rate would make a wrong "
+                f"rate look identical to a price change. Record the rates in "
+                f"{self.currency}."
+            )
         if self.verdict == "inconclusive":
             return (
-                f"inconclusive: spent ~${self.predicted_usd:.6f}, below the "
-                f"${self.min_spend_usd:.2f} floor set by {self.currency} balance "
-                f"rounding. Reconcile around a full eval run, not a single call."
+                f"inconclusive: spent ~{self.predicted:.6f} {self.currency}, below the "
+                f"{self.min_spend:.2f} {self.currency} floor set by balance rounding. "
+                f"Reconcile around a full eval run, not a single call."
             )
-        if self.compares_natively:
-            assert self.predicted_native is not None
-            charged = f"{self.charged_native:.4f} {self.currency}"
-            predicted = f"{self.predicted_native:.4f} {self.currency}"
-            basis = "native comparison, no FX involved"
-            causes = "rates changed, or another workload shares this account"
-        else:
-            charged = f"${self.charged_usd:.4f}"
-            predicted = f"${self.predicted_usd:.4f}"
-            basis = f"converted at {self.fx_to_usd} — weaker, FX participates"
-            causes = (
-                "rates changed, the FX rate is wrong, or another workload shares "
-                "this account"
-            )
+        charged = f"{self.charged:.4f} {self.currency}"
+        predicted = f"{self.predicted:.4f} {self.currency}"
 
         if self.verdict == "consistent":
             return (
                 f"consistent: provider charged {charged}, table predicted {predicted} "
-                f"(ratio {self.ratio:.3f}, within ±{self.tolerance:.0%}; {basis})"
+                f"(ratio {self.ratio:.3f}, within ±{self.tolerance:.0%})"
             )
         return (
             f"TABLE SUSPECT: provider charged {charged} but the table predicted "
-            f"{predicted} (ratio {self.ratio:.3f}; {basis}). Either {causes}. "
-            f"Re-check the published rates before trusting any cost figure."
+            f"{predicted} (ratio {self.ratio:.3f}). Either the rates changed or "
+            f"another workload shares this account. Re-check the published rates "
+            f"before trusting any cost figure."
         )
 
 

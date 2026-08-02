@@ -7,7 +7,7 @@ Three things are being verified, and only the first is about "does it work":
    `Response`.
 2. **The usage fields**: each provider reports tokens under its own field names, and
    the adapter's normalisation is guesswork until seen against a real payload. This
-   is what lets `cost_usd` stop being labelled unverified.
+   is what lets the cost figures stop being labelled unverified.
 3. **The prompt cache**: the second identical call should report cached input
    tokens. That is the number behind the claim that breakpoint ordering is the
    highest-leverage cost decision in the gateway — and if it comes back zero, the
@@ -26,20 +26,11 @@ from agent.core.investigation import Investigation, ToolBudget, Window
 from agent.llm.clients import env_summary, live_gateway, load_env, smoke_routing
 from agent.llm.cost import Ledger
 from agent.llm.provider_catalog import MODELS, model
-from agent.llm.reconcile import (
-    DEFAULT_MIN_SPEND_USD,
-    ReconcileUnavailable,
-    Reconciliation,
-    reader_for,
-)
+from agent.llm.reconcile import ReconcileUnavailable, Reconciliation, reader_for
 from agent.llm.request import PromptFragment, SystemPrompt
 from agent.llm.routing import CallKind
 from agent.llm.types import Message, TextBlock
 from agent.llm.usage import cost_of
-
-#: Only used to convert a CNY balance delta for comparison. Recorded in output so a
-#: wrong rate is visible rather than silently shifting the verdict. Not a price.
-_FX_CNY_USD = 0.14
 
 #: Long enough that a prompt cache has something to hit on the second call —
 #: providers set a minimum cacheable prefix (commonly ~1k tokens), so a short
@@ -64,7 +55,7 @@ def _investigation() -> Investigation:
         id="inv_smoke",
         trigger="alert",
         window=Window.around(datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)),
-        budget=ToolBudget(max_cost_usd=0.50),
+        budget=ToolBudget(max_cost={"USD": 0.50, "CNY": 3.50}),
     )
 
 
@@ -121,16 +112,10 @@ async def _one_provider(model_id: str, stream: bool) -> dict:
             currency=before[1],
             balance_before=before[0],
             balance_after=after[0],
-            # FX is passed explicitly rather than guessed: a hidden conversion error
-            # is indistinguishable from a price change, which is the exact signal
-            # this check exists to produce.
-            fx_to_usd=spec.price.fx_to_usd if spec.price.currency != "USD" else _FX_CNY_USD,
-            predicted_usd=ledger.money_spent_usd,
-            # When the price table is denominated in the same currency the provider
-            # bills in, the comparison needs no exchange rate at all — which is the
-            # stronger result, because then only a rate change can explain drift.
-            predicted_native=ledger.money_spent_native.get(before[1]),
-            predicted_currency=before[1] if before[1] in ledger.money_spent_native else "",
+            # Same-currency comparison only. No conversion is offered, because an
+            # exchange rate would make a wrong rate look identical to a price change.
+            predicted=ledger.money_spent.get(spec.price.currency, 0.0),
+            predicted_currency=spec.price.currency,
         )
 
     entries = [e for e in ledger.entries if not e.cached]
@@ -147,7 +132,8 @@ async def _one_provider(model_id: str, stream: bool) -> dict:
                 "output": e.usage.output_tokens,
                 "cache_read": e.usage.cache_read_tokens,
                 "cache_write": e.usage.cache_write_tokens,
-                "cost_usd": round(e.cost_usd, 6),
+                "cost": round(e.cost.native, 6),
+                "currency": e.currency,
                 "attempts": e.attempts,
             }
             for e in entries
@@ -216,9 +202,9 @@ def _price_check(result: dict) -> list[str]:
             cache_read_tokens=entry["cache_read"],
             cache_write_tokens=entry["cache_write"],
         )
-        expected = round(cost_of(usage, spec.price), 6)
-        if abs(expected - entry["cost_usd"]) > 1e-9:
-            notes.append(f"cost mismatch: ledger {entry['cost_usd']} vs recomputed {expected}")
+        expected = round(cost_of(usage, spec.price).native, 6)
+        if abs(expected - entry["cost"]) > 1e-9:
+            notes.append(f"cost mismatch: ledger {entry['cost']} vs recomputed {expected}")
     if not spec.price.verified:
         notes.append(
             f"price table {spec.price.as_of} is UNVERIFIED — compare the token counts "
@@ -277,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"  call {i}: in={entry['input']} out={entry['output']} "
                 f"cache_read={entry['cache_read']} cache_write={entry['cache_write']} "
-                f"cost=${entry['cost_usd']} attempts={entry['attempts']}"
+                f"cost={entry['cost']} {entry['currency']} attempts={entry['attempts']}"
             )
         print(f"  provider prompt cache hit on 2nd call: {result['prompt_cache_hit_on_second_call']}")
         if result["streamed_chunks"]:

@@ -12,7 +12,7 @@ import unittest
 from agent.llm.cost import Ledger
 from agent.llm.provider_catalog import model
 from agent.llm.reconcile import (
-    DEFAULT_MIN_SPEND_USD,
+    DEFAULT_MIN_SPEND,
     ReconcileUnavailable,
     Reconciliation,
     reader_for,
@@ -52,12 +52,13 @@ class TestPriceStaleness(unittest.TestCase):
         price = Price(input=1.0, output=2.0, as_of="whenever")
         self.assertTrue(price.is_stale("2020-01-01"))
 
-    def test_currency_and_fx_are_recorded_not_assumed(self):
+    def test_currency_is_recorded_and_never_converted(self):
         """A hidden conversion error is indistinguishable from a price change, so
-        the rate has to be part of the record."""
-        price = Price(input=2.0, output=8.0, currency="CNY", fx_to_usd=0.14, fx_as_of="2026-08-02")
+        there is deliberately no exchange rate anywhere in this system."""
+        price = Price(input=2.0, output=8.0, currency="CNY")
         self.assertEqual(price.currency, "CNY")
-        self.assertEqual(price.fx_as_of, "2026-08-02")
+        self.assertFalse(hasattr(price, "fx_to_usd"))
+        self.assertFalse(hasattr(Cost(native=1.0, currency="CNY"), "usd"))
 
     def test_catalogue_prices_are_currently_unverified(self):
         self.assertFalse(model("deepseek-chat").price.verified)
@@ -114,82 +115,94 @@ class TestLedgerProvenance(unittest.TestCase):
             cached=True,
             cost=Cost(native=0.000123, currency="USD"),  # what it cost back then
         )
-        self.assertAlmostEqual(ledger.entries[0].cost_usd, 0.000123)
+        self.assertAlmostEqual(ledger.entries[0].cost.native, 0.000123)
 
-    def test_a_replayed_cost_keeps_the_fx_rate_that_applied_then(self):
-        """The reason native is authoritative: re-converting an old amount at
-        today's rate would restate history every time the exchange rate moved."""
+    def test_a_replayed_cost_keeps_its_own_currency(self):
         ledger = Ledger(investigation_id="inv")
         ledger.record(
             kind="main_loop",
             model_id="deepseek-chat",
             provider="deepseek",
             usage=Usage(1000, 100),
-            price=Price(input=2.0, output=8.0, currency="CNY", fx_to_usd=0.99),
+            price=Price(input=2.0, output=8.0, currency="CNY"),
             cached=True,
-            cost=Cost(native=1.0, currency="CNY", fx_to_usd=0.14, fx_as_of="2026-01-01"),
+            cost=Cost(native=1.0, currency="CNY"),
         )
         entry = ledger.entries[0]
         self.assertEqual(entry.cost.native, 1.0)
         self.assertEqual(entry.currency, "CNY")
-        self.assertAlmostEqual(entry.cost_usd, 0.14, places=9)
 
 
 class TestReconciliation(unittest.TestCase):
-    def _rec(self, charged_cny: float, predicted_usd: float, **kwargs) -> Reconciliation:
+    def _rec(self, charged_cny: float, predicted_cny: float, **kwargs) -> Reconciliation:
+        kwargs.setdefault("predicted_currency", "CNY")
         return Reconciliation(
             provider="deepseek",
             currency="CNY",
             balance_before=100.0,
             balance_after=100.0 - charged_cny,
-            fx_to_usd=0.14,
-            predicted_usd=predicted_usd,
+            predicted=predicted_cny,
             **kwargs,
         )
 
     def test_agreement_within_tolerance_is_consistent(self):
-        # 1.00 CNY charged ≈ $0.14; table predicted $0.14
-        rec = self._rec(charged_cny=1.0, predicted_usd=0.14)
+        rec = self._rec(charged_cny=1.0, predicted_cny=1.0)
         self.assertEqual(rec.verdict, "consistent")
         self.assertAlmostEqual(rec.ratio, 1.0, places=6)
 
     def test_a_doubled_charge_marks_the_table_suspect(self):
         """The signal a price rise produces."""
-        rec = self._rec(charged_cny=2.0, predicted_usd=0.14)
+        rec = self._rec(charged_cny=2.0, predicted_cny=1.0)
         self.assertEqual(rec.verdict, "table_suspect")
         self.assertAlmostEqual(rec.ratio, 2.0, places=6)
         self.assertIn("TABLE SUSPECT", rec.explain())
 
+    def test_no_exchange_rate_participates(self):
+        """The comparison is CNY against CNY. With a conversion in the middle, a
+        wrong rate and a real price change produce the same signal — leaving the
+        check unable to answer the one question it exists for."""
+        rec = self._rec(charged_cny=1.0, predicted_cny=1.0)
+        self.assertTrue(rec.comparable)
+        self.assertNotIn("fx", " ".join(rec.summary().keys()).lower())
+
+    def test_a_mismatched_currency_refuses_to_guess(self):
+        """A USD-denominated table against a CNY balance is not converted — it is
+        reported as not comparable, with the fix named."""
+        rec = self._rec(charged_cny=1.0, predicted_cny=0.14, predicted_currency="USD")
+        self.assertFalse(rec.comparable)
+        self.assertEqual(rec.verdict, "not_comparable")
+        self.assertIsNone(rec.ratio)
+        self.assertIn("Record the rates in CNY", rec.explain())
+
     def test_small_spend_is_inconclusive_rather_than_noise(self):
-        """Balance is reported to 2dp of CNY, about $0.0014, while a single call
-        costs orders of magnitude less. Reporting a ratio there would be reporting
-        rounding error as a finding."""
-        rec = self._rec(charged_cny=0.0, predicted_usd=0.000133)
+        """Balance is reported to 2dp of CNY while a single call costs orders of
+        magnitude less. Reporting a ratio there would report rounding as a finding."""
+        rec = self._rec(charged_cny=0.0, predicted_cny=0.001)
         self.assertTrue(rec.below_resolution)
         self.assertEqual(rec.verdict, "inconclusive")
         self.assertIn("below the", rec.explain())
         self.assertIn("eval run", rec.explain(), "the message must say what to do instead")
 
     def test_the_resolution_floor_is_configurable_and_documented(self):
-        rec = self._rec(charged_cny=0.5, predicted_usd=0.07, min_spend_usd=0.0)
+        rec = self._rec(charged_cny=0.5, predicted_cny=0.5, min_spend=0.0)
         self.assertFalse(rec.below_resolution)
-        self.assertEqual(DEFAULT_MIN_SPEND_USD, 0.05)
+        self.assertEqual(DEFAULT_MIN_SPEND, 0.35)
 
     def test_tolerance_is_generous_on_purpose(self):
-        """Rounding, FX drift and other workloads on the same account all
-        contribute. A jumpy check trains people to ignore it."""
-        rec = self._rec(charged_cny=1.2, predicted_usd=0.14)  # ratio ~1.2
+        """Rounding and other workloads on the same account both contribute. A jumpy
+        check trains people to ignore it."""
+        rec = self._rec(charged_cny=1.2, predicted_cny=1.0)  # ratio 1.2
         self.assertEqual(rec.verdict, "consistent")
 
     def test_zero_prediction_cannot_produce_a_ratio(self):
-        rec = self._rec(charged_cny=1.0, predicted_usd=0.0)
+        rec = self._rec(charged_cny=1.0, predicted_cny=0.0)
         self.assertIsNone(rec.ratio)
         self.assertEqual(rec.verdict, "inconclusive")
 
-    def test_summary_records_the_fx_rate_used(self):
-        summary = self._rec(charged_cny=1.0, predicted_usd=0.14).summary()
-        self.assertEqual(summary["fx_to_usd"], 0.14)
+    def test_summary_reports_one_currency_only(self):
+        summary = self._rec(charged_cny=1.0, predicted_cny=1.0).summary()
         self.assertEqual(summary["currency"], "CNY")
+        self.assertEqual(summary["predicted_currency"], "CNY")
 
     def test_a_provider_without_a_balance_endpoint_says_so(self):
         with self.assertRaises(ReconcileUnavailable) as ctx:
@@ -207,10 +220,12 @@ class TestCacheSavingsMath(unittest.TestCase):
         usage = Usage(input_tokens=14, output_tokens=18, cache_read_tokens=1536)
         full_input_cost = 1536 * price.input / 1_000_000
         discounted = 1536 * price.cache_read_rate / 1_000_000
-        self.assertAlmostEqual(cache_savings(usage, price), full_input_cost - discounted, places=12)
+        saving = cache_savings(usage, price)
+        self.assertAlmostEqual(saving.native, full_input_cost - discounted, places=12)
+        self.assertEqual(saving.currency, price.currency)
 
     def test_no_cached_tokens_means_no_savings(self):
-        self.assertEqual(cache_savings(Usage(100, 10), model("deepseek-chat").price), 0.0)
+        self.assertEqual(cache_savings(Usage(100, 10), model("deepseek-chat").price).native, 0.0)
 
     def test_cost_uses_the_discounted_rate_for_cached_reads(self):
         price = model("deepseek-chat").price
@@ -220,13 +235,11 @@ class TestCacheSavingsMath(unittest.TestCase):
         self.assertEqual(cached.currency, price.currency)
 
     def test_cost_is_denominated_in_the_price_table_currency(self):
-        """Not silently USD: the native amount is what the provider will bill, and
-        it is the figure that never needs restating when FX moves."""
-        cny = Price(input=2.0, output=8.0, currency="CNY", fx_to_usd=0.14)
+        """Not silently USD: the amount is exactly what the provider will bill."""
+        cny = Price(input=2.0, output=8.0, currency="CNY")
         cost = cost_of(Usage(input_tokens=1_000_000), cny)
         self.assertEqual(cost.currency, "CNY")
         self.assertAlmostEqual(cost.native, 2.0, places=9)
-        self.assertAlmostEqual(cost.usd, 0.28, places=9)
 
     def test_mixed_currency_costs_refuse_to_add(self):
         """Summing CNY and USD yields a number that is a cost in neither currency —
@@ -234,14 +247,16 @@ class TestCacheSavingsMath(unittest.TestCase):
         with self.assertRaises(ValueError):
             Cost(native=1.0, currency="CNY") + Cost(native=1.0, currency="USD")
 
-    def test_ledger_reports_native_totals_per_currency(self):
+    def test_ledger_reports_totals_per_currency_and_never_sums_them(self):
+        """The agent bills in one currency and the judge in another. They are separate
+        lines, not a sum — which is why no exchange rate is needed anywhere."""
         ledger = Ledger(investigation_id="inv")
         ledger.record(
             kind="main_loop",
             model_id="deepseek-chat",
             provider="deepseek",
             usage=Usage(input_tokens=1_000_000),
-            price=Price(input=2.0, output=8.0, currency="CNY", fx_to_usd=0.14),
+            price=Price(input=2.0, output=8.0, currency="CNY"),
         )
         ledger.record(
             kind="judge",
@@ -252,11 +267,12 @@ class TestCacheSavingsMath(unittest.TestCase):
         )
         summary = ledger.summary()
         self.assertEqual(
-            {k: round(v, 4) for k, v in summary["money_spent_native"].items()},
+            {k: round(v, 4) for k, v in summary["money_spent"].items()},
             {"CNY": 2.0, "USD": 3.0},
         )
-        # The USD view sums across currencies; the native record does not pretend to.
-        self.assertAlmostEqual(summary["money_spent_usd"], 0.28 + 3.0, places=6)
+        self.assertTrue(summary["mixed_currencies"])
+        self.assertEqual(summary["by_kind"]["main_loop"], {"CNY": 2.0})
+        self.assertEqual(summary["by_kind"]["judge"], {"USD": 3.0})
 
 
 if __name__ == "__main__":

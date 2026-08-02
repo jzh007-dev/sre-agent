@@ -21,13 +21,13 @@ from the test suite.
 | `llm/request.py` | construction | Prompt fragment **order** (cache prefix), where breakpoints go, the cache key, the context pre-check |
 | `llm/gateway.py` | assembly | The order of operations, the budget refusal, fallback, tracing |
 | `llm/cache.py` | decorator | Whether this call happens at all; replays the original cost on a hit |
-| `llm/cost.py` | decorator | Two totals: what was paid (native, authoritative) and what the budget was charged |
+| `llm/cost.py` | decorator | Two totals **per currency**: what was paid and what the budget was charged |
 | `llm/transport.py` | transport | Retry, backoff, circuit breaker, concurrency limit. Knows one provider |
 | `llm/errors.py` | shared | Which failures are retryable, and which count toward the breaker |
 | `llm/openai_compat.py` | adapter | DeepSeek/Qwen/Kimi codec + error classification + streaming |
 | `llm/anthropic.py` | adapter | Anthropic codec, `cache_control` markers, 529 handling |
-| `llm/usage.py` | shared | Token normalisation; `Cost` holding native + USD |
-| `llm/reconcile.py` | — | Whether the price table still matches reality |
+| `llm/usage.py` | shared | Token normalisation; `Cost` in the provider's billing currency, never converted |
+| `llm/reconcile.py` | — | Whether the price table still matches reality, by same-currency comparison against the provider's own balance |
 
 The rule the layout enforces: **`core/` never imports a concrete implementation.**
 `tests/test_architecture.py` fails the build otherwise.
@@ -36,7 +36,7 @@ The rule the layout enforces: **`core/` never imports a concrete implementation.
 
 ## 1. Happy path — cache miss
 
-**预设**: `deepseek-chat` routed for `main_loop`; budget `$0.40`; response cache empty; breaker closed.
+**预设**: `deepseek-chat` routed for `main_loop`; budget `{"USD": 0.40}`; response cache empty; breaker closed.
 
 **情景**: `GS-RES-001-redis-oom` fires. First LLM turn.
 
@@ -50,7 +50,7 @@ The rule the layout enforces: **`core/` never imports a concrete implementation.
 | 4 | `request.py` | Orders fragments `[A]methodology [B]contract [C]integration [D]budget`; breakpoints after `[B]` and `[C]`; `cache_key()` = SHA-256 over model + system + messages + **tool schemas** + params |
 | 5 | `cache.py` | Miss. `misses += 1` |
 | 6 | `request.py` | `check_context()` — estimate ≤ 85% of 64 000. Passes |
-| 7 | `gateway.py` | Budget gate: `$0 < $0.40`. Passes |
+| 7 | `gateway.py` | Budget gate in **this provider's currency**: `0 < 0.40 USD`. A currency with no ceiling is refused, not treated as unbounded |
 | 8 | `transport.py` | Breaker closed → acquire semaphore (max 4) → `adapter.send()` |
 | 9 | `openai_compat.py` | Renders OpenAI payload — **no `cache_control`**, DeepSeek caches prefixes automatically. Parses reply; a response carrying tool calls becomes `TOOL_USE` regardless of `finish_reason` |
 | 10 | `usage.py` | `prompt_cache_hit_tokens` **subtracted from** `prompt_tokens`, or cached tokens would be billed at full rate |
@@ -100,8 +100,8 @@ with `cached=True` and **replays the original `Cost`** rather than recomputing i
 
 ```
 calls: 2   cached_calls: 1
-money_spent_usd:    0.000067   ← what was paid
-budget_charged_usd: 0.000134   ← what the ceiling saw
+money_spent:    {"USD": 0.000067}   ← what was paid
+budget_charged: {"USD": 0.000134}   ← what the ceiling saw
 ```
 
 Two totals, because they answer different questions. If a hit were also free of
@@ -185,7 +185,7 @@ because its accuracy belongs to neither model and its cost mixes two price sheet
 
 ## 7. Budget exhausted
 
-**预设**: `ToolBudget(max_cost_usd=0.10)`; already spent `$0.28`.
+**预设**: `ToolBudget(max_cost={"USD": 0.10})`; already spent `$0.28`.
 
 **过程**: cache miss → context check passes → **budget gate refuses** →
 `BudgetExceeded` → gateway does *not* try fallback (a ceiling is ours, not the
@@ -226,13 +226,13 @@ in `llm/protocol.py`, not a provider failure — W3 L6 catches it and compacts.
 ```json
 {
   "calls": 2, "cached_calls": 1, "total_attempts": 3,
-  "money_spent_native": {"USD": 0.000133},
-  "money_spent_usd": 0.000133,
-  "budget_charged_usd": 0.000200,
-  "cache_savings_usd": 0.000774,
-  "by_kind": {"main_loop": 0.000133},
+  "money_spent": {"USD": 0.000133},
+  "budget_charged": {"USD": 0.000200},
+  "cache_savings": {"USD": 0.000774},
+  "by_kind": {"main_loop": {"USD": 0.000133}},
   "fell_back": false,
-  "fx_rates_used": ["USD@1.0"],
+  "currencies": ["USD"],
+  "mixed_currencies": false,
   "prices_verified": false,
   "price_table_versions": ["2026-08-02.unverified"],
   "mixed_price_tables": false
@@ -241,23 +241,27 @@ in `llm/protocol.py`, not a provider failure — W3 L6 catches it and compacts.
 
 Four of these fields exist to keep the number honest rather than flattering:
 
-- **`money_spent_native`** is the record — exactly what the providers will invoice,
-  in the currency they invoice in. It never needs restating when exchange rates move.
-  `money_spent_usd` is a *derived view* for cross-provider comparison.
+- **Every amount is per currency and never converted** — exactly what the providers
+  will invoice, in the currency they invoice in. There is deliberately no single
+  scalar total: the agent bills in one currency and the judge in another, and those
+  are separate lines rather than a sum. A conversion would add a continuously-moving
+  second error source, and would make a wrong rate look identical to a price change.
 - **`prices_verified: false`** — the rates were written from memory and the docs site
   is unreachable from this environment. Every figure above is arithmetic-correct and
   rate-unconfirmed, and says so.
 - **`mixed_price_tables`** — a run spanning a price edit would be summing two rate
   sets into a number that is a cost at neither.
-- **`fx_rates_used`** — a hidden conversion error is indistinguishable from a price
-  change, so the rate is part of the record.
+- **`mixed_currencies`** — a run spanning two billing currencies (only possible via
+  fallback, which is already tagged) cannot be summed, and says so.
 
 And reconciliation closes the loop: **compare the provider's own balance delta
-against what the table predicted.** When the table is denominated in the billing
-currency the comparison is native and FX drops out entirely. Currently DeepSeek's
-table is USD against a CNY balance, so it takes the weaker converted path and says
-so — one more reason to record the rates in CNY.
+against what the table predicted, in the same currency.** No exchange rate
+participates, which is what makes the check able to answer its own question.
 
-Below `$0.05` of spend it returns `inconclusive` rather than a ratio: DeepSeek's
-balance has 2-decimal CNY resolution (~$0.0014) and a single call costs ~$0.00007,
-three orders of magnitude below. It is a batch instrument, sized for an eval run.
+Currently DeepSeek's table is USD-denominated against a CNY balance, so the verdict
+is **`not_comparable`** — deliberately not a converted guess. Recording the rates in
+CNY switches it on.
+
+Below `0.35 CNY` of spend it returns `inconclusive` rather than a ratio: the balance
+has 2-decimal resolution and a single call costs a tiny fraction of that. It is a
+batch instrument, sized for an eval run.

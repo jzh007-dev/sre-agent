@@ -157,7 +157,7 @@ class BoundLLM:
         cached = self.gateway.cache.get(key)
         if cached is not None:
             # Replay the original cost so the budget behaves identically to the
-            # uncached run; `cached=True` keeps it out of money_spent_usd.
+            # uncached run; `cached=True` keeps it out of money_spent.
             self.ledger.record(
                 kind=self.kind.value,
                 model_id=cached.model_id,
@@ -223,22 +223,34 @@ class BoundLLM:
         return response
 
     def _check_budget(self, spec: ModelSpec) -> None:
-        """Refuse rather than truncate.
+        """Refuse rather than truncate, in the currency this provider bills in.
 
         Refusing is what turns a cost target into a mechanism: the harness degrades
         to an "insufficient evidence" report naming the ceiling that stopped it,
         instead of quietly spending more. The loop converts this into
         `Aborted("budget", ...)`.
+
+        A currency with no configured ceiling is refused too. Treating it as
+        unbounded would let a newly-added provider escape the budget silently, which
+        is the failure this gate exists to prevent.
         """
-        ceiling = self.inv.budget.max_cost_usd
-        spent = self.ledger.budget_charged_usd
+        currency = spec.price.currency
+        ceiling = self.inv.budget.ceiling_for(currency)
+        if ceiling is None:
+            raise BudgetExceeded(
+                f"investigation {self.inv.id} has no {currency} ceiling configured, so "
+                f"a {spec.id} call cannot be gated; add {currency} to ToolBudget.max_cost",
+                currency=currency,
+            )
+        spent = self.ledger.spent_in(currency)
         if spent >= ceiling:
             raise BudgetExceeded(
-                f"investigation {self.inv.id} has spent ${spent:.4f} of its "
-                f"${ceiling:.4f} ceiling; refusing a further {self.kind.value} call "
-                f"to {spec.id}",
-                spent_usd=spent,
-                ceiling_usd=ceiling,
+                f"investigation {self.inv.id} has spent {spent:.4f} {currency} of its "
+                f"{ceiling:.4f} {currency} ceiling; refusing a further "
+                f"{self.kind.value} call to {spec.id}",
+                spent=spent,
+                ceiling=ceiling,
+                currency=currency,
             )
 
     def _trace(
@@ -264,6 +276,7 @@ class BoundLLM:
                 "turn": self.inv.turn,
                 # Version stamps: EVAL.md's reproducibility matrix is keyed on
                 # these, so a trace missing them cannot be placed in it.
+                "currency": spec.price.currency,
                 "price_table_version": spec.price.as_of,
                 "prices_verified": spec.price.verified,
                 "ledger": self.ledger.summary(),

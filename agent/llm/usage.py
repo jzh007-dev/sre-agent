@@ -1,6 +1,6 @@
 """Token usage and cost — shared layer.
 
-[EVAL.md](../../EVAL.md) names the gateway as the sole source of `cost_usd`, so
+[EVAL.md](../../EVAL.md) names the gateway as the sole source of cost, so
 this module is where a headline number in the project's own reporting comes from.
 That imposes a discipline the rest of the codebase does not need: **a cost figure
 must say which price table produced it.**
@@ -10,6 +10,11 @@ going stale the day it is written. Rather than pretend otherwise, every `Price`
 carries an `as_of` date and a `verified` flag, and every ledger entry records the
 table version it was priced with. A cost reported from an unverified table is
 labelled as such in eval output instead of being presented as measured fact.
+
+**No currency conversion anywhere.** Costs are reported in whatever the provider
+bills in — CNY for DeepSeek, USD for Anthropic. An exchange rate would add a second,
+continuously-moving source of error on top of the rates themselves, and would make a
+wrong rate indistinguishable from a price change. See `Cost`.
 """
 from __future__ import annotations
 
@@ -73,11 +78,18 @@ class Price:
     differs states its own numbers; a provider with no prompt cache leaves them
     at their defaults and simply never reports cache tokens.
 
-    **Currency is explicit because it is a second source of error.** DeepSeek's
-    balance endpoint reports CNY while these figures are USD, so a USD cost carries
-    an FX assumption stacked on top of the rate itself. `fx_to_usd` records the rate
-    used, so a cost figure is reproducible rather than depending on what the
-    exchange rate happened to be when someone wrote the table.
+    **Currency is explicit, and never converted.** Rates are recorded in whatever
+    the provider actually bills in, and costs are reported in that same currency.
+    Exchange rates move continuously, so any conversion would make a cost figure
+    depend on when it was computed — and a wrong rate would be indistinguishable
+    from a rate change, which is precisely the thing `reconcile.py` exists to detect.
+    Denominating in the billing currency removes the ambiguity instead of recording
+    it.
+
+    The consequence is that there is no single scalar "total cost" across providers
+    billing in different currencies. That turns out not to be needed: the agent runs
+    on one provider and the judge on another, and their costs are separate lines in
+    `by_kind` rather than a sum.
     """
 
     input: float
@@ -88,13 +100,8 @@ class Price:
     #: False until checked against the provider's published pricing. Propagates
     #: into eval output so an unverified figure is never reported as measured.
     verified: bool = False
-    #: What the rates above are denominated in.
+    #: What the rates above are denominated in — and what costs are reported in.
     currency: str = "USD"
-    #: Multiplier to USD. 1.0 when `currency == "USD"`. Recorded rather than applied
-    #: silently, so a cost can be re-derived if the rate was wrong.
-    fx_to_usd: float = 1.0
-    #: ISO date the FX rate was taken. Empty when no conversion applies.
-    fx_as_of: str = ""
 
     @property
     def stale_after(self) -> str:
@@ -120,48 +127,40 @@ class Price:
 
 @dataclass(frozen=True)
 class Cost:
-    """A cost held in **both** currencies, with the native one authoritative.
+    """An amount in the currency the provider bills in. No conversion, ever.
 
-    Exchange rates move continuously, so a cost recorded only in USD silently
-    depends on whatever rate applied when it was written — and can never be
-    corrected, because the original amount is gone.
+    This is exactly what will appear on the invoice, so it never needs restating —
+    unlike a converted figure, which silently depends on the exchange rate that
+    applied when it was written and cannot be corrected once the original amount is
+    gone.
 
-    - `native` is exactly what the provider will bill, in the currency it bills in.
-      It never needs revision.
-    - `usd` is *derived* at `fx_to_usd`, recorded alongside so the conversion is
-      reproducible and auditable. USD exists only for cross-provider comparison and
-      for budget ceilings, which need one comparable unit.
-
-    The payoff shows up in reconciliation: a CNY balance delta is compared against
-    a CNY prediction, so **FX drops out of the check that detects price drift
-    entirely**. Previously that check needed a conversion, which meant a wrong rate
-    and a real price change produced the same signal.
+    Dropping conversion also makes `reconcile.py` strictly sharper: the provider's
+    balance delta and our prediction are in the same currency, so **no exchange rate
+    participates in the check that detects price drift**. With a conversion in the
+    middle, a wrong rate and a real price change produce the same signal, leaving
+    that check unable to answer the one question it exists for.
     """
 
     native: float
     currency: str = "USD"
-    fx_to_usd: float = 1.0
-    fx_as_of: str = ""
-
-    @property
-    def usd(self) -> float:
-        return self.native * self.fx_to_usd
 
     def __add__(self, other: Cost) -> Cost:
-        """Only same-currency costs add. Summing CNY and USD would produce a number
-        that is a cost in neither, which is exactly the silent-wrongness this class
-        exists to prevent — so it fails loudly instead."""
+        """Only same-currency costs add.
+
+        Summing CNY and USD yields a number that is a cost in neither, which is the
+        silent wrongness this type exists to prevent — so it raises. Report per
+        currency instead; nothing in this system actually needs a mixed-currency
+        total.
+        """
         if other.currency != self.currency:
             raise ValueError(
-                f"cannot add {self.currency} and {other.currency} costs; "
-                f"sum the USD views instead, or keep them separate per currency"
+                f"cannot add {self.currency} and {other.currency} costs — report them "
+                f"per currency instead. There is deliberately no exchange rate here."
             )
-        return Cost(
-            native=self.native + other.native,
-            currency=self.currency,
-            fx_to_usd=self.fx_to_usd,
-            fx_as_of=self.fx_as_of,
-        )
+        return Cost(native=self.native + other.native, currency=self.currency)
+
+    def __str__(self) -> str:
+        return f"{self.native:.6f} {self.currency}"
 
 
 def cost_of(usage: Usage, price: Price) -> Cost:
@@ -173,15 +172,10 @@ def cost_of(usage: Usage, price: Price) -> Cost:
         + usage.cache_write_tokens * price.cache_write_rate
         + usage.cache_read_tokens * price.cache_read_rate
     ) / per_token
-    return Cost(
-        native=native,
-        currency=price.currency,
-        fx_to_usd=price.fx_to_usd,
-        fx_as_of=price.fx_as_of,
-    )
+    return Cost(native=native, currency=price.currency)
 
 
-def cache_savings(usage: Usage, price: Price) -> float:
+def cache_savings(usage: Usage, price: Price) -> Cost:
     """What the prompt cache saved on this call, versus paying full input rate.
 
     Reported because `cache_control` breakpoint placement is claimed to be the
@@ -189,12 +183,10 @@ def cache_savings(usage: Usage, price: Price) -> float:
     A claim like that needs a number attached, and this is the number.
     """
     if not usage.cache_read_tokens:
-        return 0.0
+        return Cost(native=0.0, currency=price.currency)
     full = usage.cache_read_tokens * price.input
     discounted = usage.cache_read_tokens * price.cache_read_rate
-    # Reported in USD like the other headline figures; the native saving is
-    # recoverable by dividing out price.fx_to_usd.
-    return (full - discounted) * price.fx_to_usd / 1_000_000.0
+    return Cost(native=(full - discounted) / 1_000_000.0, currency=price.currency)
 
 
 def _date_part(version: str) -> str:

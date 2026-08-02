@@ -82,16 +82,26 @@ class ToolBudget:
     """Ceilings the code sets and the model spends against.
 
     The model chooses *what* to spend on and in *what order*; it never sets or
-    raises these. Cost accounting arrives with the gateway in L3 —
-    `max_cost_usd` is carried here now so the field does not have to be threaded
-    through later.
+    raises these.
+
+    `max_cost` is **per currency** because costs are never converted — a provider
+    billing in CNY is gated by the CNY ceiling. A currency with no ceiling raises at
+    the gate rather than running unbounded, so a newly-added provider cannot quietly
+    escape the budget.
     """
 
     max_turns: int = 15
     max_tool_calls: int = 40
-    max_cost_usd: float = 0.40
+    #: currency → ceiling. Defaults cover the two currencies this project bills in.
+    max_cost: Mapping[str, float] = field(
+        default_factory=lambda: {"USD": 0.40, "CNY": 3.00}
+    )
     #: Per-tool caps, e.g. {"query_logs": 6}. Absent tool names are uncapped.
     per_tool_calls: Mapping[str, int] = field(default_factory=dict)
+
+    def ceiling_for(self, currency: str) -> float | None:
+        """The ceiling in one currency, or None if none is configured."""
+        return self.max_cost.get(currency)
 
 
 @dataclass

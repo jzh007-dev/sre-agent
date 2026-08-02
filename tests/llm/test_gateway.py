@@ -42,6 +42,11 @@ def _investigation(**budget_kwargs) -> Investigation:
     )
 
 
+#: DeepSeek's table is USD-denominated for now, so a USD ceiling is what gates it.
+def _usd_ceiling(amount: float) -> dict[str, float]:
+    return {"USD": amount}
+
+
 class FakeAdapter:
     """Scripted adapter. Each entry is an exception to raise or a (Response, Usage)."""
 
@@ -117,14 +122,16 @@ class TestCacheAndBudget(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ledger.calls, 2)
         self.assertEqual(ledger.cached_calls, 1)
-        # Money counts one call; the budget counts both.
-        self.assertAlmostEqual(ledger.budget_charged_usd, ledger.money_spent_usd * 2, places=9)
-        self.assertGreater(ledger.money_spent_usd, 0.0)
+        # Money counts one call; the budget counts both. Per currency, no conversion.
+        self.assertAlmostEqual(
+            ledger.budget_charged["USD"], ledger.money_spent["USD"] * 2, places=9
+        )
+        self.assertGreater(ledger.money_spent["USD"], 0.0)
 
     async def test_budget_exhaustion_refuses_before_sending(self):
         adapter = FakeAdapter("deepseek", usage=Usage(1_000_000, 0))  # ~$0.28
         gw = _gateway({"deepseek": adapter})
-        inv = _investigation(max_cost_usd=0.10)
+        inv = _investigation(max_cost=_usd_ceiling(0.10))
         llm = gw.bind(inv)
 
         await llm.call([], [])  # spends past the ceiling
@@ -132,7 +139,8 @@ class TestCacheAndBudget(unittest.IsolatedAsyncioTestCase):
             await llm.call(_other_messages(), [])  # different key, so no cache hit
 
         self.assertEqual(adapter.calls, 1, "the second call must not reach the provider")
-        self.assertGreater(ctx.exception.spent_usd, ctx.exception.ceiling_usd)
+        self.assertGreater(ctx.exception.spent, ctx.exception.ceiling)
+        self.assertEqual(ctx.exception.currency, "USD")
 
     async def test_cache_hit_is_free_of_money_but_can_still_trip_the_budget(self):
         """A hit is served even when it would exceed the ceiling — it costs nothing,
@@ -141,7 +149,7 @@ class TestCacheAndBudget(unittest.IsolatedAsyncioTestCase):
         adapter = FakeAdapter("deepseek", usage=Usage(1_000_000, 0))
         gw = _gateway({"deepseek": adapter})
         ledger = Ledger(investigation_id="inv_test")
-        llm = gw.bind(_investigation(max_cost_usd=0.10), ledger=ledger)
+        llm = gw.bind(_investigation(max_cost=_usd_ceiling(0.10)), ledger=ledger)
 
         await llm.call([], [])
         await llm.call([], [])  # cache hit — served, not refused
@@ -254,7 +262,7 @@ class TestFallback(unittest.IsolatedAsyncioTestCase):
         gw = _gateway(
             {"deepseek": adapter, "qwen": alive}, routing=self._two_provider_routing()
         )
-        llm = gw.bind(_investigation(max_cost_usd=0.10))
+        llm = gw.bind(_investigation(max_cost=_usd_ceiling(0.10)))
 
         await llm.call([], [])
         with self.assertRaises(BudgetExceeded):
@@ -306,8 +314,9 @@ class TestLedgerAndTrace(unittest.IsolatedAsyncioTestCase):
         summary = ledger.summary()
         self.assertEqual(summary["calls"], 2)
         self.assertEqual(summary["cached_calls"], 1)
-        self.assertLess(summary["money_spent_usd"], summary["budget_charged_usd"])
+        self.assertLess(summary["money_spent"]["USD"], summary["budget_charged"]["USD"])
         self.assertFalse(summary["prices_verified"])
+        self.assertFalse(summary["mixed_currencies"])
 
     async def test_by_kind_breakdown_excludes_cache_hits(self):
         gw = _gateway({"deepseek": FakeAdapter("deepseek")})
@@ -315,6 +324,15 @@ class TestLedgerAndTrace(unittest.IsolatedAsyncioTestCase):
         await gw.bind(_investigation(), CallKind.MAIN_LOOP, ledger=ledger).call([], [])
         await gw.bind(_investigation(), CallKind.MAIN_LOOP, ledger=ledger).call([], [])
         self.assertEqual(list(ledger.by_kind()), ["main_loop"])
+
+    async def test_a_currency_with_no_ceiling_is_refused_not_run_unbounded(self):
+        """A newly-added provider must not quietly escape the budget. Refusing is
+        loud; treating an absent ceiling as infinite is the silent failure."""
+        gw = _gateway({"deepseek": FakeAdapter("deepseek")})
+        inv = _investigation(max_cost={"CNY": 3.0})  # no USD ceiling
+        with self.assertRaises(BudgetExceeded) as ctx:
+            await gw.bind(inv).call([], [])
+        self.assertIn("no USD ceiling", str(ctx.exception))
 
     async def test_missing_transport_is_reported_clearly(self):
         gw = _gateway({})  # nothing wired
@@ -330,7 +348,7 @@ class TestLoopIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_budget_exceeded_becomes_an_aborted_event(self):
         adapter = FakeAdapter("deepseek", usage=Usage(1_000_000, 0))
         gw = _gateway({"deepseek": adapter})
-        inv = _investigation(max_cost_usd=0.10)
+        inv = _investigation(max_cost=_usd_ceiling(0.10))
         inv.add_user_text("<alert>{}</alert>")
         llm = gw.bind(inv)
 

@@ -89,10 +89,19 @@ class BudgetExceeded(LLMContractError):
 
     reason = "budget"
 
-    def __init__(self, message: str, *, spent_usd: float = 0.0, ceiling_usd: float = 0.0) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        spent: float = 0.0,
+        ceiling: float = 0.0,
+        currency: str = "",
+    ) -> None:
         super().__init__(message)
-        self.spent_usd = spent_usd
-        self.ceiling_usd = ceiling_usd
+        #: In `currency` — costs are never converted, so a ceiling is per currency.
+        self.spent = spent
+        self.ceiling = ceiling
+        self.currency = currency
 
 
 class ProviderUnavailable(LLMContractError):

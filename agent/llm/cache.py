@@ -184,13 +184,16 @@ def _entry_from_json(raw: dict[str, Any]) -> CacheEntry:
 def _cost_from_json(raw: dict[str, Any]) -> Cost:
     """Read a stored cost, tolerating entries written before costs were bicurrency.
 
-    An older entry holds a bare `cost_usd`; treating it as USD-native with fx 1.0 is
-    exactly what it meant at the time, so old cache files stay usable instead of
-    being silently discarded (which would look like a cache that never hits).
+    An older entry holds a bare `cost_usd`; reading it as a USD amount is exactly what
+    it meant at the time, so old cache files stay usable instead of being silently
+    discarded — which would look like a cache that never hits.
     """
     if "cost" in raw:
-        return Cost(**raw["cost"])
-    return Cost(native=raw.get("cost_usd", 0.0), currency="USD", fx_to_usd=1.0)
+        stored = dict(raw["cost"])
+        # Entries written while costs briefly carried FX fields: keep the amount and
+        # the currency, drop the conversion that no longer exists.
+        return Cost(native=stored["native"], currency=stored.get("currency", "USD"))
+    return Cost(native=raw.get("cost_usd", 0.0), currency="USD")
 
 
 def _block_to_json(block: Any) -> dict[str, Any]:

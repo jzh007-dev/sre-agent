@@ -101,7 +101,7 @@ The adversarial ten are **not** reducible: per-layer bypass rate needs roughly t
 | `report_actionability` | judge: "from this report alone, could a competent on-call execute the first step unambiguously?" | LLM judge — *diagnostic, not a target* (see below) |
 | `precompute_override_rate` | fraction of investigations whose final root cause is **not** the top-ranked precompute candidate | Investigation + precompute log |
 | `total_tool_calls` / `total_llm_calls` / `total_turns` | counts | Investigation |
-| `cost_usd` | sum of per-call cost | **LLM Gateway** |
+| `cost` | sum of per-call cost, **per billing currency** — never converted, so there is no single scalar across providers billing differently. The agent's cost and the judge's are separate lines. | **LLM Gateway** |
 | `cache_hit_rate` | gateway response-cache hits / total calls | **LLM Gateway** |
 | `latency_seconds` | wall-clock ingress → report | Investigation |
 | `time_to_first_verdict` | wall-clock to the preliminary verdict (two-stage output) | Investigation |
