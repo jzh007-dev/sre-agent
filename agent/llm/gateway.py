@@ -29,10 +29,17 @@ from typing import Any, Callable, Mapping, Sequence
 from ..core.investigation import Investigation
 from .cache import CacheEntry, MemoryStore, ResponseCache
 from .cost import Ledger
-from .errors import ProviderError
-from .protocol import BudgetExceeded, ProviderUnavailable
+from .errors import ContextLimit, ProviderError
+from .protocol import BudgetExceeded, ContextOverflow, LLMContractError, ProviderUnavailable
 from .provider_catalog import ModelSpec, provider_of
-from .request import LLMRequest, SystemPrompt, build
+from .request import (
+    CONTEXT_HEADROOM,
+    LLMRequest,
+    SystemPrompt,
+    build,
+    check_context,
+    estimate_tokens,
+)
 from .routing import CallKind, RoutingConfig, default_config, route, validate
 from .transport import Attempt, Transport
 from .types import Message, Response
@@ -125,9 +132,12 @@ class BoundLLM:
             )
             try:
                 return await self._attempt(spec, request, fell_back=index > 0)
-            except BudgetExceeded:
-                # A ceiling is ours, not the provider's — another provider would be
-                # refused identically, so do not burn the fallback chain on it.
+            except LLMContractError:
+                # Contract errors are ours, not the provider's — a budget ceiling or
+                # an oversized request would be refused identically by every
+                # candidate, so do not burn the fallback chain on them. Falling back
+                # on a context overflow would be actively harmful: a bigger window
+                # postpones compaction until nothing fits.
                 raise
             except (ProviderUnavailable, ProviderError) as exc:
                 errors.append(f"{spec.provider}/{spec.id}: {type(exc).__name__}: {exc}")
@@ -160,10 +170,34 @@ class BoundLLM:
             self._trace(spec, key, cached=True, attempts=[], fell_back=fell_back)
             return cached.response
 
+        # Pre-flight context check. Anticipating ContextLimit beats catching it: a
+        # 400 costs a round trip, and some providers do not distinguish "too long"
+        # from other bad requests, so the caller would have to guess whether
+        # compaction is the fix. W3 L6 catches this and compacts; until then it
+        # surfaces as a clean, actionable error instead of a provider 400.
+        fits, why = check_context(request, spec.context_window)
+        if not fits:
+            raise ContextOverflow(
+                f"request for {spec.id} does not fit: {why}",
+                estimated_tokens=estimate_tokens(request),
+                limit_tokens=int(spec.context_window * CONTEXT_HEADROOM),
+                model_id=spec.id,
+            )
+
         self._check_budget(spec)
 
         transport = self.gateway.transport_for(spec)
-        (response, usage), attempts = await transport.call(request)
+        try:
+            (response, usage), attempts = await transport.call(request)
+        except ContextLimit as exc:
+            # The provider disagreed with our estimate. Translate its detection class
+            # into the contract concept so the caller gets one thing to handle.
+            raise ContextOverflow(
+                f"{spec.id} rejected the request as too long: {exc}",
+                estimated_tokens=estimate_tokens(request),
+                limit_tokens=int(spec.context_window * CONTEXT_HEADROOM),
+                model_id=spec.id,
+            ) from exc
 
         cost = cost_of(usage, spec.price)
         self.gateway.cache.put(

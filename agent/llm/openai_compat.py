@@ -294,3 +294,105 @@ def _looks_like_timeout(exc: Exception) -> bool:
         return True
     name = type(exc).__name__.lower()
     return "timeout" in name or "timeout" in str(exc).lower()
+
+
+# --------------------------------------------------------------------------- #
+# Streaming. A side channel for latency, not a different result type: the stream
+# still ends with a complete Response, because the loop needs assembled tool_use
+# blocks to dispatch and the cache needs something to store. This is why the LLM
+# protocol signature never changed to accommodate it.
+# --------------------------------------------------------------------------- #
+
+
+class _ToolCallAccumulator:
+    """Reassembles tool calls from deltas.
+
+    Streamed tool calls arrive as fragments — the name in one chunk, the JSON
+    arguments split across several — so nothing can be parsed until the stream ends.
+    That is precisely why `StreamDone` carries the assembled `Response` rather than
+    the caller being expected to stitch chunks together.
+    """
+
+    def __init__(self) -> None:
+        self._calls: dict[int, dict[str, Any]] = {}
+
+    def add(self, delta: Any) -> None:
+        for call in getattr(delta, "tool_calls", None) or []:
+            index = getattr(call, "index", 0) or 0
+            slot = self._calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            if getattr(call, "id", None):
+                slot["id"] = call.id
+            function = getattr(call, "function", None)
+            if function is not None:
+                if getattr(function, "name", None):
+                    slot["name"] = function.name
+                if getattr(function, "arguments", None):
+                    slot["arguments"] += function.arguments
+
+    def blocks(self) -> list[ToolUseBlock]:
+        return [
+            ToolUseBlock(
+                id=slot["id"] or f"call_{index}",
+                name=slot["name"],
+                input=_parse_arguments(slot["arguments"]),
+            )
+            for index, slot in sorted(self._calls.items())
+        ]
+
+    def __bool__(self) -> bool:
+        return bool(self._calls)
+
+
+class StreamingOpenAICompatAdapter(OpenAICompatAdapter):
+    """Adds `stream()`. Separate class so the non-streaming path stays the simple
+    one and `Transport.call` keeps working with any adapter."""
+
+    async def stream(self, request: LLMRequest):
+        from .transport import StreamDone, TextChunk
+
+        payload = self.render(request)
+        payload["stream"] = True
+        # Ask for usage in the final chunk; providers that ignore this option simply
+        # report nothing, and the fallback below keeps accounting from silently
+        # becoming zero.
+        payload["stream_options"] = {"include_usage": True}
+
+        text_parts: list[str] = []
+        tool_calls = _ToolCallAccumulator()
+        finish_reason = ""
+        usage = Usage()
+
+        try:
+            stream = await self.client.create(**payload)
+            async for event in stream:
+                reported = _parse_usage(event)
+                if reported.total:
+                    usage = reported
+                for choice in getattr(event, "choices", None) or []:
+                    delta = getattr(choice, "delta", None)
+                    if delta is None:
+                        continue
+                    piece = getattr(delta, "content", None)
+                    if piece:
+                        text_parts.append(piece)
+                        yield TextChunk(text=piece)
+                    tool_calls.add(delta)
+                    if getattr(choice, "finish_reason", None):
+                        finish_reason = choice.finish_reason
+        except errors.ProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise self.classify(exc) from exc
+
+        content: list[Any] = []
+        if text_parts:
+            content.append(TextBlock(text="".join(text_parts)))
+        content.extend(tool_calls.blocks())
+
+        stop = _STOP_REASONS.get(finish_reason, StopReason.END_TURN)
+        if tool_calls:
+            stop = StopReason.TOOL_USE
+
+        yield StreamDone(
+            response=Response(stop_reason=stop, content=content), usage=usage
+        )

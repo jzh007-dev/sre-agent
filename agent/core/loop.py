@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncIterator, Mapping, Sequence
 
-from ..llm.protocol import LLM, BudgetExceeded, ProviderUnavailable
+from ..llm.protocol import LLM, LLMContractError
 from ..llm.types import ContentBlock, Message, StopReason, TextBlock, ToolUseBlock
 from ..tools.dispatch import safe_dispatch
 from ..tools.protocol import Tool, tool_schemas
@@ -59,17 +59,17 @@ async def run(
 
         try:
             response = await llm.call(inv.messages, tools=schemas)
-        except BudgetExceeded as exc:
-            # The gateway refused the call rather than truncating it. Everything
-            # gathered so far is still on `inv.messages`, so the harness can emit a
-            # partial report naming the ceiling that stopped the investigation.
-            yield Aborted("budget", str(exc))
-            return
-        except ProviderUnavailable as exc:
-            # Every candidate failed, or the breaker is open and fallback is off
-            # (which is the eval wiring). Not a tool failure and not recoverable
-            # here — retry, backoff and fallback all already happened below.
-            yield Aborted("provider_unavailable", str(exc))
+        except LLMContractError as exc:
+            # Budget exhausted, context overflowed, or every provider unavailable.
+            # All three are refusals rather than crashes, and everything gathered so
+            # far is still on `inv.messages` — so the harness can emit a partial
+            # report naming what stopped the investigation.
+            #
+            # One clause, keyed on the exception's own `reason`: adding a fourth
+            # contract error needs no change here. Provider-specific errors never
+            # reach this point — they are retried, contained, or collapsed into
+            # ProviderUnavailable by the gateway.
+            yield Aborted(exc.reason, str(exc))
             return
 
         inv.messages.append(Message(role="assistant", content=list(response.content)))

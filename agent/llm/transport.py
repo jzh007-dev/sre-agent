@@ -26,8 +26,9 @@ import asyncio
 import random
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Awaitable, Callable, Protocol
+from typing import AsyncIterator, Awaitable, Callable, Protocol, Union
 
+from . import errors
 from .errors import ProviderError
 from .protocol import ProviderUnavailable
 from .request import LLMRequest
@@ -170,6 +171,43 @@ class Adapter(Protocol):
         ...
 
 
+class StreamingAdapter(Adapter, Protocol):
+    """An adapter that can also stream.
+
+    Optional by design: `Transport.call` works with any `Adapter`, and only
+    `stream()` requires this. A provider without streaming support degrades to
+    non-streaming rather than being unusable.
+    """
+
+    def stream(self, request: LLMRequest) -> AsyncIterator[StreamChunk]:
+        """Yield chunks, ending with exactly one `StreamDone`."""
+        ...
+
+
+@dataclass(frozen=True)
+class TextChunk:
+    """A fragment of assistant text. Maps onto `core.events.TextDelta`."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class StreamDone:
+    """Terminal chunk: the accumulated response and its usage.
+
+    Streaming still produces a complete `Response` at the end, because the loop
+    needs the assembled `tool_use` blocks to dispatch and the cache needs something
+    to store. Streaming is a *side channel* for latency, not a different result
+    type — which is why the `LLM` protocol signature never changed.
+    """
+
+    response: Response
+    usage: Usage
+
+
+StreamChunk = Union[TextChunk, StreamDone]
+
+
 @dataclass
 class Transport:
     """Retry + breaker + concurrency limit around one provider adapter."""
@@ -236,3 +274,35 @@ class Transport:
 
         assert last is not None
         raise last
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[StreamChunk]:
+        """Stream one attempt. **No retries.**
+
+        Deliberate: once a partial response has been shown to a human or appended to
+        a digest, silently restarting would replay text the caller already saw. A
+        stream that fails is surfaced so the caller decides — retry from scratch, or
+        keep the partial and continue. The breaker is still updated, because a
+        failed stream is evidence about the provider either way.
+        """
+        adapter = self.adapter
+        if not hasattr(adapter, "stream"):
+            raise errors.InvalidRequest(
+                f"{adapter.provider} adapter does not support streaming",
+                provider=adapter.provider,
+            )
+
+        if not self.breaker.allows():
+            raise ProviderUnavailable(
+                f"circuit breaker is {self.breaker.state().value} for {adapter.provider}",
+                tried=[adapter.provider],
+            )
+
+        try:
+            async with self._sem():
+                async for chunk in adapter.stream(request):  # type: ignore[attr-defined]
+                    yield chunk
+        except ProviderError as exc:
+            self.breaker.record_failure(exc)
+            raise
+        else:
+            self.breaker.record_success()

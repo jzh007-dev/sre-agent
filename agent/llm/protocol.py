@@ -12,7 +12,7 @@ wiring decision. Implementations:
 - `LiteLLMAdapter` — a documented swap-in that is deliberately not built
   ([§34](../../TRADEOFFS.md#34-litellm-not-adopted-kept-as-a-documented-swap-in)).
 
-**The two exceptions below are part of this contract, not provider details.**
+**The contract exceptions below are part of this contract, not provider details.**
 That is why they live here rather than in `errors.py`: `core/loop.py` is allowed
 to import from `llm.protocol` under the seam rule, so the loop can convert them
 into `Aborted` events and preserve the L2 invariant that every run emits exactly
@@ -28,7 +28,54 @@ from .types import Message, Response
 
 
 class LLMContractError(Exception):
-    """Base for failures the loop is expected to handle rather than propagate."""
+    """Base for failures the loop is expected to handle rather than propagate.
+
+    Each subclass declares a `reason`, and the loop turns any contract error into
+    `Aborted(exc.reason, str(exc))` with a single `except` clause. That is the seam
+    rule applied to itself: a fourth contract error needs no change to the kernel.
+    """
+
+    #: Short, stable label. Ends up in eval metrics and in the JSONL log, so it is
+    #: part of the observable contract rather than a message detail.
+    reason: str = "llm_contract_error"
+
+
+class ContextOverflow(LLMContractError):
+    """The request does not fit the model's context window.
+
+    Distinct from `errors.ContextLimit`, which is the *provider-detection* class the
+    transport taxonomy keys on. This is the contract-level concept, and the gateway
+    translates one into the other — which is precisely the chokepoint's job.
+
+    Two consequences follow from it being a contract error rather than a provider
+    failure:
+
+    - **It never triggers cross-provider fallback.** Falling back to a model with a
+      bigger window would postpone the problem rather than fix it, and the context
+      would keep growing until nothing fits. The fix is local: compact (W3 L6).
+    - **It carries the numbers compaction needs** — how much was estimated and how
+      much room there is — so the caller does not have to re-derive them.
+    """
+
+    reason = "context_overflow"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        estimated_tokens: int = 0,
+        limit_tokens: int = 0,
+        model_id: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.estimated_tokens = estimated_tokens
+        self.limit_tokens = limit_tokens
+        self.model_id = model_id
+
+    @property
+    def excess_tokens(self) -> int:
+        """Roughly how much has to go. What compaction targets."""
+        return max(self.estimated_tokens - self.limit_tokens, 0)
 
 
 class BudgetExceeded(LLMContractError):
@@ -39,6 +86,8 @@ class BudgetExceeded(LLMContractError):
     the harness degrades to an "insufficient evidence" report naming the ceiling
     that stopped it, instead of quietly spending more.
     """
+
+    reason = "budget"
 
     def __init__(self, message: str, *, spent_usd: float = 0.0, ceiling_usd: float = 0.0) -> None:
         super().__init__(message)
@@ -56,6 +105,8 @@ class ProviderUnavailable(LLMContractError):
     delta 9.
     """
 
+    reason = "provider_unavailable"
+
     def __init__(self, message: str, *, tried: Sequence[str] = ()) -> None:
         super().__init__(message)
         self.tried = tuple(tried)
@@ -69,7 +120,8 @@ class LLM(Protocol):
     ) -> Response:
         """Take conversation state + tool schemas, return the next Response.
 
-        May raise `BudgetExceeded` or `ProviderUnavailable`; the loop converts
-        both into `Aborted` events. Any other exception is a bug and propagates.
+        May raise any `LLMContractError`; the loop converts each into an `Aborted`
+        event using the exception's `reason`. Any other exception is a bug and
+        propagates.
         """
         ...

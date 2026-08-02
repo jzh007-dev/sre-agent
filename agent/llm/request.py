@@ -166,6 +166,58 @@ def _message_repr(message: Message) -> dict[str, Any]:
     return {"role": message.role, "content": blocks}
 
 
+#: Characters per token, used only for the pre-flight context check below. A crude
+#: average across English prose, JSON and code — deliberately crude, because the
+#: alternative is shipping a per-provider tokenizer to answer a question whose only
+#: consumer is a threshold.
+CHARS_PER_TOKEN = 3.5
+
+#: Fraction of the context window a request may occupy before the pre-check warns.
+#: Not 1.0: output tokens come out of the same window, and a request that fits with
+#: nothing to spare produces a truncated answer rather than a clean failure.
+CONTEXT_HEADROOM = 0.85
+
+
+def estimate_tokens(request: LLMRequest) -> int:
+    """Rough token count for the whole request.
+
+    Used by `check_context` and, from W3 L6, to decide when compaction is needed.
+    An estimate rather than a real count on purpose: a per-provider tokenizer would
+    add a dependency and a model-version coupling to serve a single threshold, and
+    being 20% wrong about "are we near the limit" changes nothing about the answer.
+    """
+    chars = len(request.system.text())
+    for message in request.messages:
+        for block in message.content:
+            for attr in ("text", "content"):
+                value = getattr(block, attr, None)
+                if isinstance(value, str):
+                    chars += len(value)
+            if getattr(block, "type", "") == "tool_use":
+                chars += len(str(getattr(block, "input", "")))
+    chars += sum(len(str(tool)) for tool in request.tools)
+    return int(chars / CHARS_PER_TOKEN) + request.max_tokens
+
+
+def check_context(request: LLMRequest, context_window: int) -> tuple[bool, str]:
+    """Pre-flight context check: `(fits, why_not)`.
+
+    Anticipating `ContextLimit` beats catching it. A 400 costs a round trip, and on
+    some providers the error text does not distinguish "too long" from other bad
+    requests — so the caller would have to guess whether compaction is the fix.
+    Checking first turns that into a local decision.
+    """
+    estimate = estimate_tokens(request)
+    budget = int(context_window * CONTEXT_HEADROOM)
+    if estimate <= budget:
+        return True, ""
+    return False, (
+        f"estimated {estimate} tokens exceeds {budget} usable of {context_window} "
+        f"(headroom {CONTEXT_HEADROOM:.0%} reserves room for the response); "
+        f"compaction needed"
+    )
+
+
 def build(
     model_id: str,
     messages: Sequence[Message],
