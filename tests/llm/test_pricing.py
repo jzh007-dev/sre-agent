@@ -17,7 +17,14 @@ from agent.llm.reconcile import (
     Reconciliation,
     reader_for,
 )
-from agent.llm.usage import PRICE_TABLE_MAX_AGE_DAYS, Price, Usage, cache_savings, cost_of
+from agent.llm.usage import (
+    PRICE_TABLE_MAX_AGE_DAYS,
+    Cost,
+    Price,
+    Usage,
+    cache_savings,
+    cost_of,
+)
 
 
 class TestPriceStaleness(unittest.TestCase):
@@ -105,9 +112,27 @@ class TestLedgerProvenance(unittest.TestCase):
             usage=Usage(1000, 100),
             price=Price(input=99.0, output=99.0),  # today's (absurd) table
             cached=True,
-            cost_usd=0.000123,  # what it actually cost back then
+            cost=Cost(native=0.000123, currency="USD"),  # what it cost back then
         )
         self.assertAlmostEqual(ledger.entries[0].cost_usd, 0.000123)
+
+    def test_a_replayed_cost_keeps_the_fx_rate_that_applied_then(self):
+        """The reason native is authoritative: re-converting an old amount at
+        today's rate would restate history every time the exchange rate moved."""
+        ledger = Ledger(investigation_id="inv")
+        ledger.record(
+            kind="main_loop",
+            model_id="deepseek-chat",
+            provider="deepseek",
+            usage=Usage(1000, 100),
+            price=Price(input=2.0, output=8.0, currency="CNY", fx_to_usd=0.99),
+            cached=True,
+            cost=Cost(native=1.0, currency="CNY", fx_to_usd=0.14, fx_as_of="2026-01-01"),
+        )
+        entry = ledger.entries[0]
+        self.assertEqual(entry.cost.native, 1.0)
+        self.assertEqual(entry.currency, "CNY")
+        self.assertAlmostEqual(entry.cost_usd, 0.14, places=9)
 
 
 class TestReconciliation(unittest.TestCase):
@@ -191,7 +216,47 @@ class TestCacheSavingsMath(unittest.TestCase):
         price = model("deepseek-chat").price
         cached = cost_of(Usage(input_tokens=0, cache_read_tokens=1000), price)
         uncached = cost_of(Usage(input_tokens=1000), price)
-        self.assertLess(cached, uncached)
+        self.assertLess(cached.native, uncached.native)
+        self.assertEqual(cached.currency, price.currency)
+
+    def test_cost_is_denominated_in_the_price_table_currency(self):
+        """Not silently USD: the native amount is what the provider will bill, and
+        it is the figure that never needs restating when FX moves."""
+        cny = Price(input=2.0, output=8.0, currency="CNY", fx_to_usd=0.14)
+        cost = cost_of(Usage(input_tokens=1_000_000), cny)
+        self.assertEqual(cost.currency, "CNY")
+        self.assertAlmostEqual(cost.native, 2.0, places=9)
+        self.assertAlmostEqual(cost.usd, 0.28, places=9)
+
+    def test_mixed_currency_costs_refuse_to_add(self):
+        """Summing CNY and USD yields a number that is a cost in neither currency —
+        precisely the silent wrongness this type exists to prevent."""
+        with self.assertRaises(ValueError):
+            Cost(native=1.0, currency="CNY") + Cost(native=1.0, currency="USD")
+
+    def test_ledger_reports_native_totals_per_currency(self):
+        ledger = Ledger(investigation_id="inv")
+        ledger.record(
+            kind="main_loop",
+            model_id="deepseek-chat",
+            provider="deepseek",
+            usage=Usage(input_tokens=1_000_000),
+            price=Price(input=2.0, output=8.0, currency="CNY", fx_to_usd=0.14),
+        )
+        ledger.record(
+            kind="judge",
+            model_id="claude-sonnet-5",
+            provider="anthropic",
+            usage=Usage(input_tokens=1_000_000),
+            price=Price(input=3.0, output=15.0, currency="USD"),
+        )
+        summary = ledger.summary()
+        self.assertEqual(
+            {k: round(v, 4) for k, v in summary["money_spent_native"].items()},
+            {"CNY": 2.0, "USD": 3.0},
+        )
+        # The USD view sums across currencies; the native record does not pretend to.
+        self.assertAlmostEqual(summary["money_spent_usd"], 0.28 + 3.0, places=6)
 
 
 if __name__ == "__main__":

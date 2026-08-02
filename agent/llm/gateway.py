@@ -165,7 +165,7 @@ class BoundLLM:
                 usage=cached.usage,
                 price=spec.price,
                 cached=True,
-                cost_usd=cached.cost_usd,
+                cost=cached.cost,
             )
             self._trace(spec, key, cached=True, attempts=[], fell_back=fell_back)
             return cached.response
@@ -205,7 +205,7 @@ class BoundLLM:
             CacheEntry(
                 response=response,
                 usage=usage,
-                cost_usd=cost,
+                cost=cost,
                 model_id=spec.id,
                 price_table_version=spec.price.as_of,
             ),

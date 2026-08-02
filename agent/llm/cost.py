@@ -18,13 +18,21 @@ reproducibility.
 **Provenance on every entry.** Each entry records the price table version it was
 costed with, and whether that table was verified against published pricing. A
 total computed from unverified prices is reported as unverified, not as measured.
+
+**Native currency is the record; USD is a view.** Exchange rates move continuously,
+so a cost stored only in USD silently depends on whatever rate applied when it was
+written, and cannot be corrected because the original amount is gone. Entries hold
+a `Cost` carrying both, with the native amount authoritative — see `usage.Cost`.
+Budget ceilings stay in USD because a ceiling has to be one comparable unit across
+providers; that is a policy number, and being approximate is acceptable for it in a
+way it is not for a record of spend.
 """
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from .usage import PRICE_TABLE_VERSION, Price, Usage, cache_savings, cost_of
+from .usage import PRICE_TABLE_VERSION, Cost, Price, Usage, cache_savings, cost_of
 
 
 @dataclass(frozen=True)
@@ -33,7 +41,8 @@ class CostEntry:
     model_id: str
     provider: str
     usage: Usage
-    cost_usd: float
+    #: Authoritative in the provider's billing currency; `.usd` is the derived view.
+    cost: Cost
     cached: bool = False
     #: Attempts consumed in transport. >1 means retries happened, which is one of
     #: the few things that explains a latency outlier.
@@ -45,6 +54,15 @@ class CostEntry:
     #: the entry so a historical cost stays interpretable after the table moves on.
     price_stale_after: str = ""
     cache_savings_usd: float = 0.0
+
+    @property
+    def cost_usd(self) -> float:
+        """Derived USD view. Reporting only — never the record of what was billed."""
+        return self.cost.usd
+
+    @property
+    def currency(self) -> str:
+        return self.cost.currency
 
 
 @dataclass
@@ -65,20 +83,20 @@ class Ledger:
         cached: bool = False,
         attempts: int = 1,
         fell_back: bool = False,
-        cost_usd: float | None = None,
+        cost: Cost | None = None,
     ) -> CostEntry:
         """Append an entry.
 
-        `cost_usd` is passed explicitly on a cache replay, where the authoritative
-        figure is what the *original* call cost — recomputing it from the current
-        price table would silently reprice history.
+        `cost` is passed explicitly on a cache replay, where the authoritative figure
+        is what the *original* call cost at the rate and FX that applied then —
+        recomputing it from the current table would silently reprice history.
         """
         entry = CostEntry(
             kind=kind,
             model_id=model_id,
             provider=provider,
             usage=usage,
-            cost_usd=cost_of(usage, price) if cost_usd is None else cost_usd,
+            cost=cost_of(usage, price) if cost is None else cost,
             cached=cached,
             attempts=attempts,
             fell_back=fell_back,
@@ -91,8 +109,24 @@ class Ledger:
         return entry
 
     @property
+    def money_spent_native(self) -> dict[str, float]:
+        """What was actually paid, **per billing currency** — cache hits excluded.
+
+        This is the authoritative figure: it is what the providers will invoice, and
+        it never needs restating when exchange rates move. A dict rather than a
+        scalar because two providers may bill in different currencies, and adding
+        those together would produce a number that is a cost in neither.
+        """
+        totals: dict[str, float] = defaultdict(float)
+        for entry in self.entries:
+            if not entry.cached:
+                totals[entry.currency] += entry.cost.native
+        return dict(totals)
+
+    @property
     def money_spent_usd(self) -> float:
-        """What was actually paid — cache hits excluded. Eval reports this."""
+        """Derived USD view — cache hits excluded. What eval reports, because a
+        single comparable unit is needed across providers."""
         return sum(e.cost_usd for e in self.entries if not e.cached)
 
     @property
@@ -166,6 +200,7 @@ class Ledger:
             "calls": self.calls,
             "cached_calls": self.cached_calls,
             "total_attempts": self.total_attempts,
+            "money_spent_native": {c: round(v, 6) for c, v in self.money_spent_native.items()},
             "money_spent_usd": round(self.money_spent_usd, 6),
             "budget_charged_usd": round(self.budget_charged_usd, 6),
             "cache_savings_usd": round(sum(e.cache_savings_usd for e in self.entries), 6),
@@ -174,6 +209,7 @@ class Ledger:
             "output_tokens": self.usage_total.output_tokens,
             "cache_read_tokens": self.usage_total.cache_read_tokens,
             "fell_back": self.fell_back,
+            "fx_rates_used": sorted({f"{e.currency}@{e.cost.fx_to_usd}" for e in self.entries}),
             "prices_verified": self.fully_verified_prices,
             "price_table_versions": sorted(self.price_table_versions),
             "mixed_price_tables": len(self.price_table_versions) > 1,

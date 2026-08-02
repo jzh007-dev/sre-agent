@@ -27,6 +27,7 @@ The full rationale, tradeoffs, and interview-mapped depth points are in the docs
 |---|---|
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | Shape, topology, who-decides-what, repository layout, data flow, scale targets, Tier 2/3 evolution |
 | [DIAGNOSIS.md](./DIAGNOSIS.md) | The reasoning procedure — precompute rules, elimination rules with pruning conditions, the in-model boundary, the report contract |
+| [docs/CALL_WALKTHROUGH.md](./docs/CALL_WALKTHROUGH.md) | One LLM call traced eight ways — cache hit, retry, breaker open, budget refusal, context overflow — with each file's role |
 | [TRADEOFFS.md](./TRADEOFFS.md) | Every key decision with A/B alternatives and reasoning |
 | [SECURITY.md](./SECURITY.md) | Threat model, five-layer prompt injection defense, known gaps |
 | [EVAL.md](./EVAL.md) | Metrics, golden set spec, judge design, regression methodology |

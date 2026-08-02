@@ -18,10 +18,14 @@ run over ~30 cases is comfortably above the floor. This is a *batch* instrument,
 and `min_spend_usd` refuses to draw a conclusion below it rather than reporting
 noise as a finding.
 
-**Currency.** Balance comes back in the provider's billing currency (CNY for
-DeepSeek) while the ledger is USD, so the comparison needs an explicit FX rate. It
-is passed in and recorded, never guessed — a wrong-but-hidden conversion would look
-exactly like a price change.
+**Currency, and why the ledger now holds native amounts.** The balance arrives in
+the provider's billing currency. If the ledger only held USD, this comparison would
+need an FX conversion — and then a wrong exchange rate and a real price change would
+produce *the same signal*, making the check unable to answer the question it exists
+for. Because `Cost` keeps the native amount authoritative, the common case compares
+**CNY against CNY and FX drops out entirely**. Conversion happens only when the
+price table is denominated differently from the balance, and that case is flagged in
+the output as a weaker result rather than reported identically.
 """
 from __future__ import annotations
 
@@ -98,11 +102,18 @@ class Reconciliation:
     """The verdict of one before/after comparison."""
 
     provider: str
+    #: Currency the *balance* is reported in.
     currency: str
     balance_before: float
     balance_after: float
     fx_to_usd: float
     predicted_usd: float
+    #: What the ledger predicted in the price table's own currency, when that
+    #: currency matches the balance's. Present means FX is not involved in the
+    #: comparison at all, which is the stronger result.
+    predicted_native: float | None = None
+    #: Currency of `predicted_native`.
+    predicted_currency: str = ""
     min_spend_usd: float = DEFAULT_MIN_SPEND_USD
     tolerance: float = DEFAULT_TOLERANCE
     notes: list[str] = field(default_factory=list)
@@ -116,13 +127,30 @@ class Reconciliation:
         return self.charged_native * self.fx_to_usd
 
     @property
+    def compares_natively(self) -> bool:
+        """True when the prediction and the charge are in the same currency.
+
+        The stronger comparison: no exchange rate participates, so a divergence can
+        only mean the rates are wrong (or another workload shares the account).
+        """
+        return self.predicted_native is not None and self.predicted_currency == self.currency
+
+    @property
     def below_resolution(self) -> bool:
         """Whether the spend was too small for the balance endpoint to resolve."""
         return max(self.charged_usd, self.predicted_usd) < self.min_spend_usd
 
     @property
     def ratio(self) -> float | None:
-        """Actual / predicted. >1 means we are under-reporting cost."""
+        """Actual / predicted. >1 means we are under-reporting cost.
+
+        Computed natively when possible so no FX error can masquerade as drift.
+        """
+        if self.compares_natively:
+            assert self.predicted_native is not None
+            if self.predicted_native <= 0:
+                return None
+            return self.charged_native / self.predicted_native
         if self.predicted_usd <= 0:
             return None
         return self.charged_usd / self.predicted_usd
@@ -142,8 +170,13 @@ class Reconciliation:
         return {
             "provider": self.provider,
             "verdict": self.verdict,
+            "compares_natively": self.compares_natively,
             "charged_native": round(self.charged_native, 4),
             "currency": self.currency,
+            "predicted_native": (
+                None if self.predicted_native is None else round(self.predicted_native, 6)
+            ),
+            "predicted_currency": self.predicted_currency,
             "fx_to_usd": self.fx_to_usd,
             "charged_usd": round(self.charged_usd, 6),
             "predicted_usd": round(self.predicted_usd, 6),
@@ -160,17 +193,30 @@ class Reconciliation:
                 f"${self.min_spend_usd:.2f} floor set by {self.currency} balance "
                 f"rounding. Reconcile around a full eval run, not a single call."
             )
+        if self.compares_natively:
+            assert self.predicted_native is not None
+            charged = f"{self.charged_native:.4f} {self.currency}"
+            predicted = f"{self.predicted_native:.4f} {self.currency}"
+            basis = "native comparison, no FX involved"
+            causes = "rates changed, or another workload shares this account"
+        else:
+            charged = f"${self.charged_usd:.4f}"
+            predicted = f"${self.predicted_usd:.4f}"
+            basis = f"converted at {self.fx_to_usd} — weaker, FX participates"
+            causes = (
+                "rates changed, the FX rate is wrong, or another workload shares "
+                "this account"
+            )
+
         if self.verdict == "consistent":
             return (
-                f"consistent: provider charged ${self.charged_usd:.4f}, table "
-                f"predicted ${self.predicted_usd:.4f} "
-                f"(ratio {self.ratio:.3f}, within ±{self.tolerance:.0%})"
+                f"consistent: provider charged {charged}, table predicted {predicted} "
+                f"(ratio {self.ratio:.3f}, within ±{self.tolerance:.0%}; {basis})"
             )
         return (
-            f"TABLE SUSPECT: provider charged ${self.charged_usd:.4f} but the table "
-            f"predicted ${self.predicted_usd:.4f} (ratio {self.ratio:.3f}). Either "
-            f"rates changed, the FX rate is wrong, or another workload shares this "
-            f"account. Re-check the published rates before trusting any cost figure."
+            f"TABLE SUSPECT: provider charged {charged} but the table predicted "
+            f"{predicted} (ratio {self.ratio:.3f}; {basis}). Either {causes}. "
+            f"Re-check the published rates before trusting any cost figure."
         )
 
 

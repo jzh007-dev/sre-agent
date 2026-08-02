@@ -118,15 +118,67 @@ class Price:
         return self.cache_read if self.cache_read is not None else self.input * 0.1
 
 
-def cost_of(usage: Usage, price: Price) -> float:
-    """Cost in USD for one call."""
+@dataclass(frozen=True)
+class Cost:
+    """A cost held in **both** currencies, with the native one authoritative.
+
+    Exchange rates move continuously, so a cost recorded only in USD silently
+    depends on whatever rate applied when it was written — and can never be
+    corrected, because the original amount is gone.
+
+    - `native` is exactly what the provider will bill, in the currency it bills in.
+      It never needs revision.
+    - `usd` is *derived* at `fx_to_usd`, recorded alongside so the conversion is
+      reproducible and auditable. USD exists only for cross-provider comparison and
+      for budget ceilings, which need one comparable unit.
+
+    The payoff shows up in reconciliation: a CNY balance delta is compared against
+    a CNY prediction, so **FX drops out of the check that detects price drift
+    entirely**. Previously that check needed a conversion, which meant a wrong rate
+    and a real price change produced the same signal.
+    """
+
+    native: float
+    currency: str = "USD"
+    fx_to_usd: float = 1.0
+    fx_as_of: str = ""
+
+    @property
+    def usd(self) -> float:
+        return self.native * self.fx_to_usd
+
+    def __add__(self, other: Cost) -> Cost:
+        """Only same-currency costs add. Summing CNY and USD would produce a number
+        that is a cost in neither, which is exactly the silent-wrongness this class
+        exists to prevent — so it fails loudly instead."""
+        if other.currency != self.currency:
+            raise ValueError(
+                f"cannot add {self.currency} and {other.currency} costs; "
+                f"sum the USD views instead, or keep them separate per currency"
+            )
+        return Cost(
+            native=self.native + other.native,
+            currency=self.currency,
+            fx_to_usd=self.fx_to_usd,
+            fx_as_of=self.fx_as_of,
+        )
+
+
+def cost_of(usage: Usage, price: Price) -> Cost:
+    """Cost for one call, in the currency the price table is denominated in."""
     per_token = 1_000_000.0
-    return (
+    native = (
         usage.input_tokens * price.input
         + usage.output_tokens * price.output
         + usage.cache_write_tokens * price.cache_write_rate
         + usage.cache_read_tokens * price.cache_read_rate
     ) / per_token
+    return Cost(
+        native=native,
+        currency=price.currency,
+        fx_to_usd=price.fx_to_usd,
+        fx_as_of=price.fx_as_of,
+    )
 
 
 def cache_savings(usage: Usage, price: Price) -> float:
@@ -140,7 +192,9 @@ def cache_savings(usage: Usage, price: Price) -> float:
         return 0.0
     full = usage.cache_read_tokens * price.input
     discounted = usage.cache_read_tokens * price.cache_read_rate
-    return (full - discounted) / 1_000_000.0
+    # Reported in USD like the other headline figures; the native saving is
+    # recoverable by dividing out price.fx_to_usd.
+    return (full - discounted) * price.fx_to_usd / 1_000_000.0
 
 
 def _date_part(version: str) -> str:

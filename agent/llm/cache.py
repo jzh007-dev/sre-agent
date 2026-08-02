@@ -32,22 +32,26 @@ from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
 from .types import Message, Response, StopReason, TextBlock, ToolResultBlock, ToolUseBlock
-from .usage import PRICE_TABLE_VERSION, Usage
+from .usage import PRICE_TABLE_VERSION, Cost, Usage
 
 
 @dataclass(frozen=True)
 class CacheEntry:
     """A stored response plus what it originally cost.
 
-    `cost_usd` and `usage` are the replay payload — without them a hit could not
-    charge the budget, and the reproducibility guarantee above would not hold.
+    `cost` and `usage` are the replay payload — without them a hit could not charge
+    the budget, and the reproducibility guarantee above would not hold. The cost is
+    stored in the provider's native currency plus the FX rate that applied, so a
+    replay is exact rather than re-converted at today's rate.
     `price_table_version` is recorded so an entry priced under an older table is
     identifiable rather than silently mixed into a cost total.
     """
 
     response: Response
     usage: Usage
-    cost_usd: float
+    #: The original call's cost, in both currencies. Replaying the native amount is
+    #: what keeps a rerun's accounting identical even if FX has since moved.
+    cost: Cost
     model_id: str
     price_table_version: str = PRICE_TABLE_VERSION
 
@@ -158,7 +162,7 @@ def _entry_to_json(entry: CacheEntry) -> dict[str, Any]:
             "content": [_block_to_json(b) for b in entry.response.content],
         },
         "usage": asdict(entry.usage),
-        "cost_usd": entry.cost_usd,
+        "cost": asdict(entry.cost),
         "model_id": entry.model_id,
         "price_table_version": entry.price_table_version,
     }
@@ -171,10 +175,22 @@ def _entry_from_json(raw: dict[str, Any]) -> CacheEntry:
             content=[_block_from_json(b) for b in raw["response"]["content"]],
         ),
         usage=Usage(**raw["usage"]),
-        cost_usd=raw["cost_usd"],
+        cost=_cost_from_json(raw),
         model_id=raw["model_id"],
         price_table_version=raw.get("price_table_version", "unknown"),
     )
+
+
+def _cost_from_json(raw: dict[str, Any]) -> Cost:
+    """Read a stored cost, tolerating entries written before costs were bicurrency.
+
+    An older entry holds a bare `cost_usd`; treating it as USD-native with fx 1.0 is
+    exactly what it meant at the time, so old cache files stay usable instead of
+    being silently discarded (which would look like a cache that never hits).
+    """
+    if "cost" in raw:
+        return Cost(**raw["cost"])
+    return Cost(native=raw.get("cost_usd", 0.0), currency="USD", fx_to_usd=1.0)
 
 
 def _block_to_json(block: Any) -> dict[str, Any]:

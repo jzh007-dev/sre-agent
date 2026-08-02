@@ -126,6 +126,11 @@ async def _one_provider(model_id: str, stream: bool) -> dict:
             # this check exists to produce.
             fx_to_usd=spec.price.fx_to_usd if spec.price.currency != "USD" else _FX_CNY_USD,
             predicted_usd=ledger.money_spent_usd,
+            # When the price table is denominated in the same currency the provider
+            # bills in, the comparison needs no exchange rate at all — which is the
+            # stronger result, because then only a rate change can explain drift.
+            predicted_native=ledger.money_spent_native.get(before[1]),
+            predicted_currency=before[1] if before[1] in ledger.money_spent_native else "",
         )
 
     entries = [e for e in ledger.entries if not e.cached]
