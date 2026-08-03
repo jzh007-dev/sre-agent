@@ -279,3 +279,34 @@ cannot be attributed to one project and an invoice line can.
 `0.35 CNY` of spend it returns `inconclusive` rather than a ratio — the balance has
 2-decimal resolution and one call costs a tiny fraction of that. It is a batch
 instrument, sized for an eval run.
+
+---
+
+## What this document cannot yet show you
+
+Every trace above is reconstructed from the test suite, not from a recorded run —
+because **there is nowhere for a run to be recorded**. An audit against the code found
+four instrument sources and zero sinks:
+
+| Instrument | State |
+|---|---|
+| `Gateway.tracer` | defaults to a no-op |
+| `transport.Attempt` (`error`, `delay_before`) | written, never read — only `len(attempts)` is used |
+| Loop event stream | fully generated, then discarded by `run_to_completion` |
+| Timing | **absent entirely** — no durations anywhere in `agent/` |
+
+So today a failed investigation leaves behind an `Aborted` reason string and nothing
+else. Scenario 4's retry, for instance, is *known* to have happened because a test
+asserts the delay list — not because a trace recorded it.
+
+**W2 L4a fixes this** and is deliberately sequenced before the dedup and correlation
+work, because those decisions have to be recorded somewhere. Once it lands, this
+document gets a ninth scenario it cannot honestly have now: **a repetition loop** —
+the model calling the same tool with identical arguments until a ceiling fires. Worth
+noting what already happens there, because it was luck rather than design: an identical
+repeated call hits the response cache, so `money_spent` stays flat, but `budget_charged`
+still grows (a hit replays the original cost), and the budget gate reads
+`budget_charged` — so the loop *is* caught. Under the naive "cache hits are free"
+design it would have run for free until `max_turns`.
+
+See [TRADEOFFS §42](../TRADEOFFS.md#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired).

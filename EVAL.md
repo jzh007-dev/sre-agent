@@ -36,26 +36,52 @@ Each case is a **directory** under `eval/golden/<case-id>/` with three files:
 
 **Why real fault injection beats fixtures**: a `mock_state` block only exercises the prompt — the tool layer is bypassed entirely, so a broken PromQL query or a ClickHouse schema mistake scores as a reasoning failure. Applying real faults to the real stack means the case exercises the ingress, the harness, the MCP transport, the queries, and the reasoning as one path. It also means a case can fault the *observability stack itself*, which is how partial-observability behavior gets tested at all.
 
-`expected.yaml` carries:
+`expected.yaml` carries — **transcribed from the actual files**, all eight of which share this schema:
 
 ```yaml
-difficulty: medium              # easy | medium | hard | pathological | adversarial
-tags: [deploy-related, db, connection-pool]
-root_cause:
-  canonical: "connection pool size reduced from 50 to 10 in v2.3.0 config change"
-  acceptable_variants:
-    - "db connection pool exhaustion"
-    - "insufficient DB connections after config change"
+canonical_root_cause: |
+  Free text. The judge scores against this plus acceptable_variants.
+acceptable_variants:
+  - a shorter phrasing that should also score well
 required_evidence:              # must appear in the report's evidence list
-  - recent_deploy.v2.3.0
-  - metric.db_pool_wait_time_p99
-required_tools_called: [list_recent_deploys, query_metrics]
-forbidden_actions: [propose_rollback]     # a config forward-fix exists; rollback is wrong here
-expected_severity: P1
-expected_investigation_count: 1           # cascades must not fork N investigations
+  - 'metric.downstream_requests_total{...} elevated'
+required_tools_called: [query_metrics, get_service_topology]
+forbidden_actions:
+  - propose_rollback:target=payment
+acceptable_actions:
+  - "notify: escalate to platform/networking"
+expected_severity_classification: P2
+hypothesis_precision:
+  must_include: [dependency_unreachable]
+  must_reject: [payment_service_bug, recent_deploy]
+narrative_checkpoints:          # optional; prose assertions for the judge
+  - "Agent must notice the client-side / server-side asymmetry"
+tags: [runnable, primitive, pattern:DEP]
+difficulty: easy
+notes: |                        # optional
 ```
 
-The last field matters for cascade cases: `GS-P-DEPENDENCY-DOWN-001` delivers four alerts, and the correct behavior is one investigation, not four.
+> **Corrected 2026-08-03.** An earlier revision of this section invented
+> `root_cause: {canonical, ...}` and `expected_severity`, because it was written from
+> the ROADMAP's prose description of the format rather than from a golden file. The
+> real field names are `canonical_root_cause` and `expected_severity_classification`,
+> with `acceptable_variants` as a sibling. This is the same failure mode the project
+> keeps catching — a document written from a memory of the code instead of the code —
+> and it is recorded rather than quietly fixed because the pattern matters more than
+> the typo.
+
+**Two fields do not exist yet and are added by W2 L4c**, when the cascade fixture is
+reshaped into a real AlertManager webhook:
+
+```yaml
+expected_investigation_count: 1   # cascades must not fork N investigations
+expected_grouping:                # *which* alerts belong together, not just how many
+  - [DownstreamFailureRateHigh/checkout, DownstreamFailureRateHigh/gateway,
+     HighErrorRate/checkout, HighErrorRate/gateway]
+```
+
+A count alone cannot distinguish "correctly grouped four alerts" from "grouped the
+wrong four", so correlation accuracy needs the grouping.
 
 ### Coverage targets
 
@@ -100,6 +126,13 @@ The adversarial ten are **not** reducible: per-layer bypass rate needs roughly t
 | `human_first_action_match` | agent's single `FIRST ACTION` vs `expected.yaml`'s hand-authored `human_first_action` | **author ground truth** |
 | `report_actionability` | judge: "from this report alone, could a competent on-call execute the first step unambiguously?" | LLM judge — *diagnostic, not a target* (see below) |
 | `precompute_override_rate` | fraction of investigations whose final root cause is **not** the top-ranked precompute candidate | Investigation + precompute log |
+| `correlation_accuracy` | agreement between the alerts actually joined and `expected_grouping` | Investigation + expected.yaml |
+| `correlation_overridden_rate` | fraction of merged investigations where the report rejects the grouping — reads both ways, like `precompute_override_rate` | Report |
+| `investigation_count` vs `expected_investigation_count` | did a cascade fork? | Ingress |
+| `suppressed_alerts` / `held_alerts` / `escalated_alerts` | dedup outcomes, **counted rather than silent** | Dedup log |
+| `repeated_call_containments` | times the model-side circuit breaker fired on an identical `(tool, args)` | Investigation |
+| `abort_reason` distribution | `max_turns` / `budget` / `context_overflow` / `provider_unavailable` / `no_report` / `max_tokens` | Investigation |
+| `duration_seconds` per span | investigation, turn, llm.call, tool.call, attempt | Trace |
 | `total_tool_calls` / `total_llm_calls` / `total_turns` | counts | Investigation |
 | `cost` | sum of per-call cost, **per billing currency** — never converted, so there is no single scalar across providers billing differently. The agent's cost and the judge's are separate lines. | **LLM Gateway** |
 | `cache_hit_rate` | gateway response-cache hits / total calls | **LLM Gateway** |
@@ -158,7 +191,10 @@ Eval runs from Week 2, before there is any reasoning quality to measure. That is
 
 | Week | Metrics that come online | That week's exit number |
 |---|---|---|
-| **W2** | termination rate, `total_turns`, `total_tool_calls`, `cost_usd`, `latency_seconds`, `cache_hit_rate`, `investigation_count` | 100% termination over 8 cases; medians recorded as baseline; cache hit >90% on identical rerun |
+| **W2** | termination rate, `total_turns`, `total_tool_calls`, cost per currency, `cache_hit_rate` | 100% termination over 8 cases; medians recorded as baseline; cache hit >90% on identical rerun |
+| **W2 L4a** | per-span `duration_seconds`, `abort_reason` distribution, `repeated_call_containments` | every abort carries a reason *and* a duration; a failed run leaves a JSONL trail |
+| **W2 L4b** | `suppressed_alerts` / `held_alerts` / `escalated_alerts` | dedup outcomes counted, never silent; a higher severity is never suppressed |
+| **W2 L4c** | `investigation_count`, `correlation_accuracy`, `correlation_overridden_rate` | 4-alert cascade → **1** investigation, grouped correctly |
 | **W3** | `root_cause_accuracy`, `hallucination_count`, `required_*_recall`, `refute_kill_rate`, `confidence_calibration`, `degraded_tool_count`, `time_to_first_verdict` | accuracy ≥ 3.0/5 mean; hallucination rate <5%; accuracy retained with ClickHouse faulted |
 | **W4** | `recall@5`, `hit@3`, retrieval p95 latency, memory A/B delta | recall@5 ≥ 0.85; A/B delta recorded |
 | **W5** | per-integration accuracy; **abstraction cost (Python lines changed to add an integration)**; cascade `investigation_count` | 0 lines of Python for integration #3; 4-alert cascade → 1 investigation |

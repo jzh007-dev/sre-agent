@@ -81,12 +81,45 @@ Both conditions are required. Downstream-with-later-onset is not a root — that
 - **Maps to**: `GS-P-DEPENDENCY-DOWN-001` — a 4-alert cascade whose correct output is one investigation naming `payment` as root and `checkout` / `gateway` as symptoms.
 - **Checker**: deterministic. The expected root is in `expected.yaml`; scoring does not need a judge.
 
-### P6 — Correlated-alert grouping
+### P6 — Deduplication and correlated-alert grouping
 
-Alerts join an in-flight investigation instead of forking a new one when they fall inside a correlation window and their services are topologically adjacent. Rule-based, no model involved.
+Two separate mechanisms, often conflated. Both are rule-based with no model involved, and the **order of the rules is the policy**.
 
-- **Maps to**: `GS-P-DEPENDENCY-DOWN-001`, via `expected_investigation_count: 1`.
-- **Lands**: W2 L4 (rule version), W4 (similarity-based deduplication of *repeat* incidents, once episodic memory exists).
+#### P6a — Deduplication (same fingerprint)
+
+Ordered; first match wins. The fingerprint comes from AlertManager rather than being recomputed, and **excludes `severity`** — including it would make a P2→P1 escalation of one condition look like two different alerts, breaking both dedup and R3.
+
+| # | Condition | Decision | Why |
+|---|---|---|---|
+| **R0** | incoming severity **higher** than what was already delivered | **new, never suppressed** | Dropping a P1 because a P2 shipped five minutes ago would prolong an outage. This precedes every suppression rule. |
+| R1 | same fingerprint, investigation in flight | **join** | Do not fork what is being investigated. |
+| R2 | same fingerprint, delivered, Δ < 5 min | **drop** | The report just went out; re-alerting only pages twice. |
+| R3 | delivered, 5-10 min, count ≥ 3 | **new, severity raised** | Recurrence right after a report means the fix did not take. A returning incident is worse than a first occurrence. |
+| R4 | low severity, window count below threshold | **hold** | A single warning is noise; N in a window is a signal, and **the aggregate carries a higher severity than any member**. Scoped to sources without their own `for:` semantics — Prometheus `for:` already does this for metric alerts, so only log-pattern alerts need it. |
+| R5 | otherwise | **new** | |
+
+Held alerts must be **flushed and counted** at window expiry rather than silently dropped, and escalation needs a ceiling — unbounded `severity+1` on repeated recurrence eventually pages everyone.
+
+#### P6b — Correlation (different fingerprints, one fault)
+
+Declared inhibition runs **first**: known causality (`up{service=X}==0` ⇒ every error-rate alert on X is a symptom) is more certain than any score. Scoring handles only the remainder.
+
+| Component | Sign | Note |
+|---|---|---|
+| Onset **ordering** | + | Not mere closeness. The same `A→B` topology means "B broke A" or "A is hammering B" depending on which onset came first — D3 versus D5. Topology gives adjacency; onset gives direction. |
+| Topology adjacency | + | k=2 with per-hop decay. The cascade case spans `payment → checkout → gateway`, so k=1 would miss it and unbounded k correlates everything in a connected graph. |
+| Periodicity | **−** | A fingerprint that fires on a schedule is probably a cron job, not a cascade. Declared in config until W4 can detect it from history. |
+| Shared dependency | + | A and B both depend on X and X is anomalous → both are symptoms of X, so group under X rather than under each other. |
+
+Edges carry `required` (a degradable dependency should not propagate correlation) and `sync` (an async hop needs a wider window).
+
+**Every merge is advisory.** A `CorrelationDecision` — rule, score, components, path, onset delta, confidence — goes into `messages` so the agent can disagree in its report. That is available to us and not to a dashboard-consuming correlation engine, and it is why the threshold can be moderate rather than timid. See [TRADEOFFS §39](./TRADEOFFS.md#39-merging-is-advisory-not-destructive).
+
+**Storm cap**: past N alerts, stop correlating and report "fleet-wide event, N services affected" — which is the most useful conclusion anyway, and avoids O(n²) pairwise scoring.
+
+- **Maps to**: `GS-P-DEPENDENCY-DOWN-001`. Note the fixture currently carries **one** alert; the four-alert cascade is what the live stack produces, so W2 L4c reshapes it to a real AlertManager webhook, adds the sibling alerts, and records the **expected grouping** rather than only a count.
+- **Lands**: P6a in W2 L4b, P6b in W2 L4c. Similarity-based recognition of *repeat* incidents waits for W4's episodic memory — and may only **inform, never suppress** ([§41](./TRADEOFFS.md#41-semantic-similarity-may-inform-it-may-never-suppress)).
+- **Measured by**: `correlation_accuracy` against the expected grouping, and `correlation_overridden_rate` — how often the agent rejects a merge. Like `precompute_override_rate` it reads both ways: too high means the topology or threshold is wrong, near-zero means the agent may be rubber-stamping.
 
 ---
 

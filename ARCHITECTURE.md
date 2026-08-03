@@ -31,7 +31,7 @@ Deployed shape stays monolithic and cheap; architectural seams stay Tier-2-shape
 │  HARNESS — deterministic pipeline (plain Python, fixed order)      │
 │                                                                   │
 │   ① route       trigger registry + integration registry lookup    │
-│   ② preprocess  per-trigger: dedup+severity / intent / scope       │
+│   ② preprocess  dedup(R0-R5) + correlate / intent / scope expand   │
 │   ③ loadout     tool bundle · ToolBudget · window · system prompt  │
 │        │                                                          │
 │   ④ ┌──▼─── AGENT LOOP — ReAct kernel (LLM decides ordering) ───┐  │
@@ -116,7 +116,8 @@ This table is the architecture. Everything else is detail.
 | What the output must look like | code (Pydantic schema) | ③/⑤ |
 | Who receives the report | code (sink registry) | ⑥ |
 | Which model serves each call | code (gateway, by task nature) | gateway |
-| Whether this alert is noise / joins an existing investigation | code (fingerprint + vector + correlation window) | ② |
+| Whether this alert is noise, or joins an existing investigation | code (fingerprint + ordered rules R0-R5) | ② |
+| Whether two *different* alerts are one fault | code (declared inhibition, then topology + onset scoring) — but **advisorily**: the merge reason goes into `messages` and the LLM may reject it ([§39](./TRADEOFFS.md#39-merging-is-advisory-not-destructive)) | ② |
 
 > **The LLM has freedom of ordering, not freedom over resources or contracts.**
 
@@ -139,6 +140,7 @@ sre-agent/
 │   ├── core/                 ── NOT pluggable: the spine ──
 │   │   investigation.py · events.py · loop.py · harness.py
 │   │   report.py · context.py · verify.py · degrade.py
+│   │   trace.py · dedup.py · correlate.py        # W2 L4a/L4b/L4c
 │   │
 │   ├── llm/                  seam: provider — gateway.py + adapters + cache + cost
 │   ├── tools/                seam: tools — protocol · dispatch · bundle · mcp_client · stubs
@@ -154,6 +156,8 @@ sre-agent/
 │
 ├── config/integrations/*.yaml   declarative; ops-editable; the whole of "adding an integration"
 ├── config/budgets.yaml          severity → budget tier
+├── config/alerting.yaml         dedup windows, burst thresholds, escalation ceiling
+├── config/topology.yaml         declared service graph; retired when W3 L2 derives it
 ├── mcp_servers/{observability,k8s,deploy}/   separate processes — the agent is their client
 ├── srectl/                      CLI: trigger · chat · patrol · replay
 ├── eval/                        golden/ (3-file cases) · backlog/ · run.py · metrics · judge
@@ -194,7 +198,7 @@ Alert is one entry mode of three. Each trigger contributes a pre-processor for h
 
 | Trigger | Step ② does | Step ⑥ does | Status |
 |---|---|---|---|
-| `alert` | fingerprint dedup, severity → budget tier, correlation window | Slack + jira | real (Week 2) |
+| `alert` | **layered dedup** (severity-aware suppression, burst aggregation, recurrence escalation) → severity → budget tier → correlation | Slack + jira | real (W2 L4b/L4c) |
 | `chat` | intent recognition | synchronous streaming back to caller | stub (Week 2), real post-Week-5 |
 | `patrol` | scope expansion → N investigations, fanned out with `asyncio.gather` | aggregated digest | stub (Week 2); value proposition undecided, see [ROADMAP open gaps](./docs/ROADMAP.md#open-gaps) |
 
@@ -384,11 +388,61 @@ Three distinct memory tiers, deliberately kept separate:
 
 ### 10. Observability of the agent itself
 
-- **Langfuse Cloud**: every LLM call, tool call, prompt version — wired at the gateway, so coverage is structural rather than remembered.
-- **OTEL → Grafana Cloud (free tier)**: per-investigation wall-clock, per-turn LLM latency + cost, per-tool call counts, error rates.
-- **Structured logs**: JSON with `investigation_id` correlation.
+**Current state, audited against the code rather than asserted** (2026-08-03): four
+instrument sources, **zero sinks**, three of them generated-and-discarded, and no
+timing anywhere. `Gateway.tracer` defaults to a no-op; `transport.Attempt`'s error and
+delay are written and never read; `run_to_completion` produces the whole event stream
+and keeps only the terminal event. A failed run currently leaves behind nothing but an
+`Aborted` reason string. The full audit and the decision to fix it first are
+[TRADEOFFS §42](./TRADEOFFS.md#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired);
+it lands as W2 L4a, ahead of the dedup and correlation work that depends on it.
 
-Note the coupling worth naming: the agent's own metrics flow into the same Prometheus it diagnoses. Fine at Tier 1.5, but in production the agent's telemetry belongs in a separate plane — otherwise the outage takes out the tooling that explains it.
+**One id.** The trace id is adopted from the alert's `correlation_id`, which joins a
+spine Week 1 already ships: `mock/services/_shared/observability.py` propagates it by
+header and stamps it on every JSON log line, and the golden alerts carry one in
+`commonAnnotations`. Threading it through tool calls into the actual queries is the
+difference between "the agent was slow" and "the agent's fourth query was slow, and
+here is what ClickHouse was doing" — answerable from the observed system's own logs.
+
+**Four span levels, each with a duration**:
+
+```
+investigation (trace root)
+├─ turn 0
+│  ├─ llm.call     model, cache_hit, tokens, cost, duration
+│  │  └─ attempt   error_class, delay_before, duration
+│  ├─ tool.call    name, args_hash, is_error, duration
+│  └─ …
+└─ outcome         Done | Aborted(reason)
+```
+
+Without durations, `p90 latency`, `time_to_first_verdict` and the critical-path profile
+are all declared metrics that cannot be computed. Retry *count* plus duration
+distinguishes "the provider was slow" from "we retried three times"; the count alone
+does not.
+
+**Four sinks**:
+
+| Sink | For | Lands |
+|---|---|---|
+| JSONL per investigation | replay, post-mortem, durability | W2 L4a |
+| Langfuse Cloud | LLM-call view, prompt versions — wired at the gateway, so coverage is structural rather than remembered | W2 L8 |
+| OTEL → Tempo | spans, alongside the mock's own Tempo, so the investigation and the incident appear in one trace view | W3 L3 |
+| Structured logs | grep, correlated by trace id | W2 L4a |
+
+**Runaway detection.** Six ceilings already guarantee a runaway *stops*: `max_turns`,
+`max_tool_calls`, `per_tool_calls`, per-currency `max_cost`, the provider circuit
+breaker, and `max_tokens` truncation. What is missing is *diagnosis*:
+`Investigation.tool_calls` counts by tool name only, so twelve different queries and
+the same query twelve times are indistinguishable. W2 L4a adds a **model-side circuit
+breaker** keyed on `(tool_name, args_hash)` — symmetric with the provider one — which
+returns an error result carrying the previous answer rather than aborting, so the run
+can recover.
+
+Note the coupling worth naming: the agent's own telemetry flows into the same
+Prometheus, and from W3 the same Tempo, that it diagnoses. Fine at Tier 1.5 and good
+for the demo, but in production the agent's telemetry belongs in a separate plane —
+otherwise the outage takes out the tooling that explains it.
 
 ---
 

@@ -566,6 +566,120 @@ routing ─→ construction ─→ │ budget gate ─→ transport │ ─→ p
 - **Cost**: the catalogue needs updating when a provider retires a model, and `srectl smoke` is the thing that will notice. Aliases are still catalogued — not to route to, but so the rejection message can name the fix.
 - **Reconsider when**: never for eval runs. A production deployment that valued availability over comparability could reasonably route to an alias, and would then have to stop claiming `model_version` reproducibility.
 
+## 38. Alert processing: AlertManager owns the notification layer, we own the investigation layer
+
+- **Decision**: do not reimplement what AlertManager already does. It computes the fingerprint, groups notifications (`group_by` / `group_wait` / `group_interval` / `repeat_interval`), and suppresses declared causal pairs (`inhibit_rules`). We consume its fingerprint and add exactly one thing on top: deciding which alerts constitute **one diagnostic unit**.
+- **The division**:
+
+| Layer | Owner | Question it answers |
+|---|---|---|
+| Notification | AlertManager | which pages fire, batched how, so a human is not woken four times |
+| Investigation | us | which alerts are one diagnostic unit, so the agent spends one budget rather than four |
+
+- **Why these are genuinely different**: `group_wait` exists to protect a human's attention; our correlation exists to protect a token budget. And `inhibit_rules` requires the causal relationship to be **declared in advance** — which is precisely the thing an SRE agent is supposed to work out. Our topology-based correlation does what inhibition cannot: infer adjacency from the service graph rather than from hand-written pairs.
+- **What we take from it rather than rebuild**:
+  - **The fingerprint.** A real AlertManager webhook carries `alerts[].fingerprint`. Computing our own would be a second, divergent definition of "the same alert". Note the Week-1 golden fixtures are a simplified PD-shaped payload and carry *no* `alerts[]`, `fingerprint`, `startsAt` or `status` — which is also why `Investigation.from_alert` currently falls back to the wall clock. Fixing the fixture shape lands with W2 L4c.
+  - **Declared inhibition runs first.** Known causality (`up{service=X}==0` ⇒ every `HighErrorRate` on X is a symptom) is more certain than any score. Scoring only handles what inhibition does not cover.
+- **Alternatives**:
+  - (A) Do correlation entirely in AlertManager with more `inhibit_rules`.
+  - (B) Ignore AlertManager's output shape and treat alerts as opaque events.
+- **Why not (A)**: it caps us at causality someone already wrote down, which is the opposite of the project's premise. Why not (B): it throws away a correct fingerprint and the group key.
+- **Cost**: two systems now have opinions about grouping, and a confusing interaction is possible — AlertManager may batch four alerts into one webhook while our correlator also wants to join them. The resolution is that a single webhook carrying several alerts is *already* one investigation, and correlation only runs across webhooks.
+- **Reconsider when**: AlertManager grows topology-aware grouping (it has not, and its design does not point that way).
+
+## 39. Merging is advisory, not destructive
+
+- **Decision**: when correlation joins alerts into one investigation, it records **why** and with what confidence, injects that into `messages` as evidence, and the agent is explicitly permitted to disagree in its report.
+- **Why this is available to us and not to commercial correlation engines**: their consumer is a human dashboard, so a merge is *destructive* — once two faults are one incident, the separation is gone. Our consumer is an LLM, so we can merge **and** hand over the reasoning: *"these 4 alerts were joined because topology says checkout→payment are adjacent and onsets differ by 12s, confidence medium; if the evidence shows two unrelated faults, say so."*
+- **What this changes**: the previous reasoning held that over-merging is strictly worse than under-merging, so the threshold had to be conservative. With an advisory merge the penalty drops, and the threshold can be less timid.
+- **What it does not change**: budget is still shared. A chimera investigation spends one budget on two faults, so the penalty is reduced, not removed. The threshold stays moderate rather than becoming liberal.
+- **Cost**: every merge must carry a `CorrelationDecision` record, and the report contract has to leave room for "I disagree with the grouping". Measured by `correlation_overridden_rate` — and like `precompute_override_rate` ([§28](#28-precompute-produces-a-shortlist-never-a-conclusion)) it reads in both directions: too high means our topology or threshold is wrong, near-zero means the agent may be rubber-stamping.
+- **Reconsider when**: the report contract shows the agent never uses the disagreement channel even on deliberately mis-merged cases — that would mean the permission is theoretical.
+
+## 40. Three cache semantics, and why the gateway refuses semantic matching
+
+- **Decision**: three distinct matching layers, only one of which is allowed to be fuzzy.
+
+| Layer | Match | Threshold | If it matches wrongly | Verdict |
+|---|---|---|---|---|
+| Gateway response cache | exact hash of model + system + messages + tools + params | none | **silently returns the wrong answer** | exact only, never semantic |
+| Alert fingerprint dedup | exact label set + time window | none | a duplicate investigation (cheap) **or a suppressed P1 (an outage)** | exact only, severity-aware |
+| Semantic reuse | embedding cosine | required | depends entirely on use — see [§41](#41-semantic-similarity-may-inform-it-may-never-suppress) | investigation layer only, advisory |
+
+- **Why the gateway must stay exact**: semantic caching is a well-known pattern (GPTCache and similar) and it is wrong here. Two prompts that are 0.97 "similar" can differ by one tool result or one number and require opposite conclusions. A semantic hit at the gateway would silently corrupt eval results while every metric looked healthy — the same failure class as [§30](#30-unmeasured-targets-are-labelled-hypotheses) and the golden-set `_meta` leak, and this project keeps finding it.
+- **A gap this analysis exposed**: `ResponseCache` currently has **no TTL and no eval/production distinction**. For eval, no TTL is exactly right — that *is* reproducibility. For chat it is wrong: an identical prompt a week later hits the cache while the world has moved on. So the cache needs a mode — unbounded in eval, short-TTL or disabled in production. Scheduled W2 L4b.
+- **Cost**: an exact-match cache has a lower hit rate than a semantic one. Accepted: a lower hit rate costs money, a wrong hit costs correctness.
+- **Reconsider when**: never for the gateway. Semantic matching belongs where a human or the agent can reject the match, not where it silently substitutes an answer.
+
+## 41. Semantic similarity may inform; it may never suppress
+
+- **Decision**: embedding similarity is allowed to *retrieve* and to *offer*, and is never allowed to *drop* an alert.
+- **Why — the costs are wildly asymmetric**:
+
+| Use | Threshold | Action on a match | Cost of a false match |
+|---|---|---|---|
+| Chat, same session | exact session id | resume the investigation | none |
+| Chat, similar question across sessions | high (~0.95) + freshness bound | **offer** the existing report; the user may still re-run | the user reads one stale answer |
+| Alert resembling a past incident | moderate (~0.8) | **retrieve as evidence** | see below |
+| Alert resembling a past incident | — | **suppress** ← never | **a prolonged outage** |
+
+- **The precedent can itself be the liability**: `GS-LOAD-001` exists partly to test this. Its nearest historical match was resolved by scaling up, and scaling up is the *wrong* answer for the retry-storm case. So a similar past incident is not merely weak evidence — weighted too highly it is actively misleading, which is why W4's exit criteria include accuracy *with the misleading precedent present*.
+- **Cost**: chat gets less automatic deduplication than a naive similarity threshold would give it. Accepted.
+- **Reconsider when**: never for suppression. The offer-vs-drop distinction is the whole decision.
+
+## 42. Traceability: one id, four sinks — and an honest audit of what is currently wired
+
+- **Audit, verified against the code on 2026-08-03** rather than from memory, because the gap is the point:
+
+| Instrument | State |
+|---|---|
+| `Gateway.tracer` | exists — and defaults to `_noop_tracer`, so **nothing is recorded unless a caller passes one** |
+| `transport.Attempt` (`error`, `error_class`, `delay_before`) | **written and never read.** The gateway consumes only `len(attempts)` |
+| Loop event stream | **fully generated and then discarded** — `run_to_completion` iterates every event and keeps only the terminal one |
+| `Investigation.messages` | complete. Currently the only genuinely complete artefact |
+| `Ledger` | complete (per call: model, provider, attempts, cached, fell_back, cost) |
+| `store/jsonl.py` | a five-line placeholder |
+| **Timing** | **absent entirely.** No `perf_counter`, no durations, anywhere in `agent/` |
+
+  So: four instrument sources, zero sinks, three of them generated-then-discarded. A failed run leaves nothing behind but an `Aborted` reason string.
+
+- **What the missing timing costs**: `p90 latency`, `time_to_first_verdict` and the critical-path profile are all *declared* metrics that are currently uncomputable. Retry count and duration together distinguish "the provider was slow" from "we retried three times"; the count alone does not.
+
+- **Decision — one id, four sinks, four span levels**:
+
+```
+investigation (trace root; id adopted from the alert's correlation_id)
+├─ turn 0
+│  ├─ llm.call     model, cache_hit, tokens, cost, duration
+│  │  └─ attempt   error_class, delay_before, duration
+│  ├─ tool.call    name, args_hash, is_error, duration
+│  └─ …
+└─ outcome         Done | Aborted(reason)
+```
+
+| Sink | For | Lands |
+|---|---|---|
+| JSONL per investigation | replay, post-mortem, durability | W2 L4a |
+| Langfuse | LLM-call view, prompt versions | W2 L8 |
+| OTEL → Tempo | spans | W3 L3, alongside the mock's own Tempo |
+| Structured logs | grep | W2 L4a |
+
+- **The join we were not making**: Week 1 already ships a correlation spine — `mock/services/_shared/observability.py` propagates a `correlation_id` by header and stamps it on every JSON log line, and the golden alerts carry one in `commonAnnotations`. Adopting it as the investigation's trace id, and threading it through tool calls into the actual queries, is the difference between *"the agent was slow"* and *"the agent's fourth query was slow, and here is what ClickHouse was doing at the time"* — answerable from the observed system's own logs.
+- **Emitting agent spans into the mock's Tempo** makes the investigation and the incident visible in one trace view, which is a strong demo. It also re-states the coupling already noted in [ARCHITECTURE §10](./ARCHITECTURE.md): the agent's telemetry then lives in the plane it diagnoses, so an outage can take out the tooling that explains it. Acceptable for a demo; a separate plane is the Tier 2 fix.
+
+### Runaway detection: what already stops, and what cannot yet be diagnosed
+
+Six ceilings already guarantee that a runaway **stops**: `max_turns`, `max_tool_calls`, `per_tool_calls`, per-currency `max_cost`, the provider circuit breaker, and `max_tokens` truncation.
+
+**A fortunate interaction, worth recording because it was not designed**: when a model repeats an identical call, our response cache hits, so `money_spent` stays flat — but `budget_charged` still grows, because a cache hit replays the original cost ([§33](#33-gateway-layering-four-layers-plus-three-cross-cutting-decorators) delta 3). The budget gate reads `budget_charged`, so it catches the loop. Under the naive design where hits are free of budget, a repetition loop would have been *free* and only `max_turns` would have ended it. A decision made for eval reproducibility bought runaway protection.
+
+**What is still missing is the diagnosis, not the stop.** `Investigation.tool_calls` counts by tool *name* only, so it cannot distinguish twelve different queries (legitimate) from the same query twelve times (stuck), and the recorded reason says `max_turns` either way.
+
+- **Decision — a circuit breaker for the model**, deliberately symmetric with the provider one: count on `(tool_name, args_hash)`; on the Nth identical call (default 3) return an `is_error` result carrying the previous result and a nudge — *"you already called this with identical arguments; the result was X; use it or try something else"* — rather than aborting. Recoverable beats fatal, and it is the same pattern as `safe_dispatch` turning a failure into evidence. Already listed unchecked in [INTERVIEW_CHECKLIST §3](./INTERVIEW_CHECKLIST.md).
+- **Ordering consequence**: [§39](#39-merging-is-advisory-not-destructive) requires every correlation decision to be recorded in four places, and W2 L4's dedup rules need the same. **Neither is possible before a sink exists**, so traceability is sequenced *first* — L4a — ahead of the dedup and correlation work it serves.
+- **Cost**: spans and timing add overhead on every call (negligible at this QPS) and a JSONL file per investigation (bounded by the turn ceiling).
+- **Reconsider when**: nothing foreseeable. The alternative is a system whose failures leave no evidence, in a project whose thesis is evidence.
+
 ---
 
 ## Meta-decisions

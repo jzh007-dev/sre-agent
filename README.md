@@ -15,7 +15,7 @@ Most "AI + observability" demos stop at "chat with logs." This project is design
 3. **Tool design discipline** — side-effect classes, gates, cost hints, and failure containment (a dead backend is evidence, not a crash).
 4. **Evaluation that can fail informatively** — nightly regression, LLM-as-judge with a kappa-gated anchor set, and metrics that watch the watchers: `precompute_override_rate` catches the case where the model contributes nothing while accuracy looks excellent.
 5. **Cost & latency engineering** — one gateway chokepoint for routing, cache breakpoints, cost accounting, and budget enforcement.
-6. **Observability of the agent itself** — every LLM and tool call traced and replayable.
+6. **Observability of the agent itself** — one trace id from alert to report, four span levels with durations, and a written audit of what was instrumented but not yet wired ([TRADEOFFS §42](./TRADEOFFS.md#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired)).
 
 The full rationale, tradeoffs, and interview-mapped depth points are in the docs below.
 
