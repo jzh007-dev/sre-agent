@@ -629,19 +629,19 @@ routing ─→ construction ─→ │ budget gate ─→ transport │ ─→ p
 
 ## 42. Traceability: one id, four sinks — and an honest audit of what is currently wired
 
-- **Audit, verified against the code on 2026-08-03** rather than from memory, because the gap is the point:
+- **Audit, verified against the code on 2026-08-03** rather than from memory, because the gap is the point. Third column added when L4a closed it:
 
-| Instrument | State |
-|---|---|
-| `Gateway.tracer` | exists — and defaults to `_noop_tracer`, so **nothing is recorded unless a caller passes one** |
-| `transport.Attempt` (`error`, `error_class`, `delay_before`) | **written and never read.** The gateway consumes only `len(attempts)` |
-| Loop event stream | **fully generated and then discarded** — `run_to_completion` iterates every event and keeps only the terminal one |
-| `Investigation.messages` | complete. Currently the only genuinely complete artefact |
-| `Ledger` | complete (per call: model, provider, attempts, cached, fell_back, cost) |
-| `store/jsonl.py` | a five-line placeholder |
-| **Timing** | **absent entirely.** No `perf_counter`, no durations, anywhere in `agent/` |
+| Instrument | State at the audit | After L4a |
+|---|---|---|
+| `Gateway.tracer` | exists — and defaults to `_noop_tracer`, so **nothing is recorded unless a caller passes one** | emits an `llm.call` span with duration; sinks live on the `Trace`, emission stays at the gateway |
+| `transport.Attempt` (`error`, `error_class`, `delay_before`) | **written and never read.** The gateway consumes only `len(attempts)` | one `attempt` span each, plus a new `duration_ms`, reported through an `on_attempt` callback that also fires on the failure path |
+| Loop event stream | **fully generated and then discarded** — `run_to_completion` iterates every event and keeps only the terminal one | `on_event` sink; the stream is what `rebuild_messages` reconstructs from |
+| `Investigation.messages` | complete. Currently the only genuinely complete artefact | unchanged, and now reconstructible from the log — asserted as an equality, not described |
+| `Ledger` | complete (per call: model, provider, attempts, cached, fell_back, cost) | `summary()` rides on every `llm.call` span and in the log's footer |
+| `store/jsonl.py` | a five-line placeholder | implemented: header / span / event / outcome / footer, append-only |
+| **Timing** | **absent entirely.** No `perf_counter`, no durations, anywhere in `agent/` | four span levels, all with durations; `Trace.profile()` computes the critical path |
 
-  So: four instrument sources, zero sinks, three of them generated-then-discarded. A failed run leaves nothing behind but an `Aborted` reason string.
+  So, at the audit: four instrument sources, zero sinks, three of them generated-then-discarded. A failed run left nothing behind but an `Aborted` reason string.
 
 - **What the missing timing costs**: `p90 latency`, `time_to_first_verdict` and the critical-path profile are all *declared* metrics that are currently uncomputable. Retry count and duration together distinguish "the provider was slow" from "we retried three times"; the count alone does not.
 
@@ -677,7 +677,25 @@ Six ceilings already guarantee that a runaway **stops**: `max_turns`, `max_tool_
 
 - **Decision — a circuit breaker for the model**, deliberately symmetric with the provider one: count on `(tool_name, args_hash)`; on the Nth identical call (default 3) return an `is_error` result carrying the previous result and a nudge — *"you already called this with identical arguments; the result was X; use it or try something else"* — rather than aborting. Recoverable beats fatal, and it is the same pattern as `safe_dispatch` turning a failure into evidence. Already listed unchecked in [INTERVIEW_CHECKLIST §3](./INTERVIEW_CHECKLIST.md).
 - **Ordering consequence**: [§39](#39-merging-is-advisory-not-destructive) requires every correlation decision to be recorded in four places, and W2 L4's dedup rules need the same. **Neither is possible before a sink exists**, so traceability is sequenced *first* — L4a — ahead of the dedup and correlation work it serves.
-- **Cost**: spans and timing add overhead on every call (negligible at this QPS) and a JSONL file per investigation (bounded by the turn ceiling).
+- **Cost — measured on 2026-08-03 rather than asserted**, because "negligible at this QPS" is exactly the kind of claim this document exists to stop taking on trust. A 3-turn investigation with 4 tool calls, stub tools, median of 400 runs:
+
+| | |
+|---|---|
+| untraced | 0.245 ms |
+| spans, in-memory sink | 0.263 ms — **instrumentation itself costs 0.017 ms** |
+| spans + events → JSONL | 1.409 ms — **the durable log costs 1.147 ms**, 25 appends |
+| one span site | 2.1 µs with tracing off, 3.5 µs on |
+| log size | 6.3 KB; ~31 KB extrapolated to the 15-turn ceiling |
+| reconstruction | exact — 7/7 messages, 12/12 blocks |
+
+  Two things fall out of that split. The instrumentation is genuinely free, and **98% of the cost is the file**, because every record is one open-write-close so that nothing is ever buffered in our process and a crash cannot swallow the evidence. Holding the handle open with a per-line flush would remove most of it and cost a file handle per in-flight investigation — not worth it at this QPS, and now a decision with a price attached rather than a preference. The whole 1.4 ms is 0.0016% of the 90-second p90 target.
+
+- **Three deltas from the design above, taken deliberately**:
+  1. **The trace id is ours; theirs is an attribute.** "Adopt the correlation_id as the trace id" reads well but collides: the golden fixtures use a case slug, so a rerun would reuse the id, and R3 in L4b deliberately mints a *second* investigation for one fingerprint. So `trace_id == inv.id`, and `correlation_id` rides on every span and in the log header. The join is still one grep, and Tempo (W3 L3) never shows two runs as one trace.
+  2. **Sinks belong to the `Trace`, not to the gateway.** `Gateway.tracer` became one span sink among several, so there is one delivery path and no precedence rule between a flat dict and a span. Emission stays at the gateway — which is what makes coverage structural — while `Gateway.trace` is only a fallback for callers with no loop above them (`srectl smoke`, direct tests). The ambient trace always wins, because parenting an `llm.call` under the turn that made it matters more than any wiring preference.
+  3. **Attempt spans are reported by callback, not read from the return value.** `Transport.call(request, on_attempt=…)` fires as each attempt finishes. A per-call parameter rather than a field, since one transport is shared by every investigation hitting that provider; and a callback rather than the returned list, because the list is lost with the exception on the failure path — the path most worth having evidence from.
+
+- **One Python detail that would have silently corrupted the tree**, worth recording because it is invisible in review: the `investigation` and `turn` spans stay open across `yield`, and an async generator runs in its **caller's** context. Verified on CPython 3.14 — if the stream is stepped from a Task and closed from the caller (what chat does on cancellation), `ContextVar.reset(token)` raises `ValueError: <Token …> was created in a different Context`. Spans therefore restore the previous parent by `set(previous)`, never by token. Mutation-tested: switching to `reset(token)` fails `test_spans_survive_a_stream_driven_from_a_task_then_abandoned`. Concurrent `tool.call` spans are fine either way, because `asyncio.gather` wraps each coroutine in a Task and a Task copies the context — which is *why* a ContextVar is the right mechanism here and a plain attribute is not.
 - **Reconsider when**: nothing foreseeable. The alternative is a system whose failures leave no evidence, in a project whose thesis is evidence.
 
 ---

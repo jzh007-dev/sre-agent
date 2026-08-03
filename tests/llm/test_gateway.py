@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from agent.core.events import Aborted, Done
 from agent.core.investigation import Investigation, ToolBudget, Window
 from agent.core.loop import run_to_completion
+from agent.core.trace import ATTEMPT, LLM_CALL, Span, Trace
 from agent.llm import errors
 from agent.llm.cache import FileStore, MemoryStore, ResponseCache
 from agent.llm.cost import Ledger
@@ -286,25 +287,69 @@ class TestFallback(unittest.IsolatedAsyncioTestCase):
 
 class TestLedgerAndTrace(unittest.IsolatedAsyncioTestCase):
     async def test_trace_carries_version_stamps_and_retry_count(self):
-        traces: list[dict] = []
+        spans: list[Span] = []
         # One timeout then success: the adapter falls through to its default result
         # once the script is exhausted, so the second attempt succeeds.
         gw = _gateway(
             {"deepseek": FakeAdapter("deepseek", [errors.Timeout("t")])},
-            tracer=traces.append,
+            trace=Trace(trace_id="t", sinks=[spans.append]),
         )
 
         await gw.bind(_investigation()).call([], [])
 
-        self.assertEqual(len(traces), 1)
-        trace = traces[0]
-        self.assertEqual(trace["attempts"], 2)
-        self.assertTrue(trace["retried"])
-        self.assertFalse(trace["cache_hit"])
-        self.assertIn("price_table_version", trace)
-        self.assertTrue(trace["prices_verified"], "verified against the provider invoice")
-        self.assertEqual(trace["currency"], "CNY")
-        self.assertEqual(trace["call_kind"], "main_loop")
+        calls = [s for s in spans if s.name == LLM_CALL]
+        self.assertEqual(len(calls), 1)
+        payload = calls[0].as_dict()
+        self.assertEqual(payload["attempts"], 2)
+        self.assertTrue(payload["retried"])
+        self.assertFalse(payload["cache_hit"])
+        self.assertIn("price_table_version", payload)
+        self.assertTrue(payload["prices_verified"], "verified against the provider invoice")
+        self.assertEqual(payload["currency"], "CNY")
+        self.assertEqual(payload["call_kind"], "main_loop")
+        # Duration is the point of the shape change: the retry count alone cannot
+        # distinguish a slow provider from two attempts.
+        self.assertIsNotNone(payload["duration_ms"])
+
+    async def test_each_transport_attempt_becomes_a_child_span(self):
+        """The audit's second finding: `Attempt.error_class` and `delay_before` were
+        written on every attempt and read by nothing."""
+        spans: list[Span] = []
+        gw = _gateway(
+            {"deepseek": FakeAdapter("deepseek", [errors.Timeout("t")])},
+            trace=Trace(trace_id="t", sinks=[spans.append]),
+        )
+
+        await gw.bind(_investigation()).call([], [])
+
+        attempts = [s for s in spans if s.name == ATTEMPT]
+        call = next(s for s in spans if s.name == LLM_CALL)
+        self.assertEqual([s.attrs["attempt"] for s in attempts], [1, 2])
+        self.assertEqual(attempts[0].attrs["error_class"], "Timeout")
+        self.assertEqual(attempts[0].status, "error")
+        self.assertEqual(attempts[1].attrs["error_class"], "")
+        self.assertTrue(
+            all(s.parent_id == call.span_id for s in attempts),
+            "attempts must nest under the llm.call they belong to",
+        )
+
+    async def test_attempts_are_traced_even_when_the_call_ultimately_fails(self):
+        """The path where the returned attempt list never arrives, which is the one
+        worth having evidence from."""
+        spans: list[Span] = []
+        gw = _gateway(
+            {"deepseek": FakeAdapter("deepseek", [errors.ServerError("500", status=500)] * 2)},
+            trace=Trace(trace_id="t", sinks=[spans.append]),
+            allow_fallback=False,
+        )
+
+        with self.assertRaises(ProviderUnavailable):
+            await gw.bind(_investigation()).call([], [])
+
+        self.assertEqual(len([s for s in spans if s.name == ATTEMPT]), 2)
+        call = next(s for s in spans if s.name == LLM_CALL)
+        self.assertEqual(call.status, "error")
+        self.assertIn("ServerError", call.attrs["error"])
 
     async def test_ledger_summary_reports_both_totals(self):
         gw = _gateway({"deepseek": FakeAdapter("deepseek")})

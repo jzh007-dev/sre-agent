@@ -15,7 +15,7 @@ Most "AI + observability" demos stop at "chat with logs." This project is design
 3. **Tool design discipline** — side-effect classes, gates, cost hints, and failure containment (a dead backend is evidence, not a crash).
 4. **Evaluation that can fail informatively** — nightly regression, LLM-as-judge with a kappa-gated anchor set, and metrics that watch the watchers: `precompute_override_rate` catches the case where the model contributes nothing while accuracy looks excellent.
 5. **Cost & latency engineering** — one gateway chokepoint for routing, cache breakpoints, cost accounting, and budget enforcement.
-6. **Observability of the agent itself** — one trace id from alert to report, four span levels with durations, and a written audit of what was instrumented but not yet wired ([TRADEOFFS §42](./TRADEOFFS.md#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired)).
+6. **Observability of the agent itself** — four span levels with durations, joined to the observed system by the alert's own `correlation_id`, and a replayable JSONL log per investigation. The section that documents it starts with an audit of what was instrumented and *not* wired, and what each gap cost ([TRADEOFFS §42](./TRADEOFFS.md#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired)).
 
 The full rationale, tradeoffs, and interview-mapped depth points are in the docs below.
 
@@ -27,7 +27,7 @@ The full rationale, tradeoffs, and interview-mapped depth points are in the docs
 |---|---|
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | Shape, topology, who-decides-what, repository layout, data flow, scale targets, Tier 2/3 evolution |
 | [DIAGNOSIS.md](./DIAGNOSIS.md) | The reasoning procedure — precompute rules, elimination rules with pruning conditions, the in-model boundary, the report contract |
-| [docs/CALL_WALKTHROUGH.md](./docs/CALL_WALKTHROUGH.md) | One LLM call traced eight ways — cache hit, retry, breaker open, budget refusal, context overflow — with each file's role |
+| [docs/CALL_WALKTHROUGH.md](./docs/CALL_WALKTHROUGH.md) | One LLM call traced nine ways — cache hit, retry, breaker open, budget refusal, context overflow, repetition loop — with each file's role, and a run replayed off disk |
 | [TRADEOFFS.md](./TRADEOFFS.md) | Every key decision with A/B alternatives and reasoning |
 | [SECURITY.md](./SECURITY.md) | Threat model, five-layer prompt injection defense, known gaps |
 | [EVAL.md](./EVAL.md) | Metrics, golden set spec, judge design, regression methodology |
@@ -42,7 +42,7 @@ The full rationale, tradeoffs, and interview-mapped depth points are in the docs
 
 **Week 1 done** — the target environment the agent observes is live: 13 real containers (7 microservices + Prometheus + AlertManager + ClickHouse + Vector + Redis), real fault injection, and 8 golden cases that reproduce real incidents end-to-end.
 
-**Week 2 in progress** — the agent skeleton. See [docs/ROADMAP.md](./docs/ROADMAP.md) for the 7-week plan and current pointer.
+**Week 2 in progress** — the agent skeleton. Loop, gateway (routing / cache / cost / budget), and the traceability spine are in: 233 tests, all offline except the two commands that deliberately hit a live provider. See [docs/ROADMAP.md](./docs/ROADMAP.md) for the 7-week plan and current pointer.
 
 ## Shape
 

@@ -18,10 +18,11 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from ..core.trace import Trace
 from .anthropic import AnthropicAdapter
 from .cache import FileStore, MemoryStore, ResponseCache
 from .credentials import api_key, configured_providers
-from .gateway import Gateway, Tracer, _noop_tracer
+from .gateway import Gateway
 from .openai_compat import OpenAICompatAdapter
 from .provider_catalog import MODELS, PROVIDERS, ProviderSpec, model
 from .routing import CallKind, RoutingConfig, default_config
@@ -138,7 +139,7 @@ def live_gateway(
     routing: RoutingConfig | None = None,
     *,
     cache_path: str | None = None,
-    tracer: Tracer = _noop_tracer,
+    trace: Trace | None = None,
     allow_fallback: bool = True,
     max_concurrency: int = 4,
 ) -> Gateway:
@@ -151,6 +152,9 @@ def live_gateway(
     `cache_path` turns on the file-backed response cache. That is the wiring eval
     wants — the expensive scenario is not one run, it is the same run repeated after
     a one-line prompt edit.
+
+    `trace` is the fallback for callers with no loop above them; a loop installs its
+    own and that one wins. See `Gateway.active_trace`.
     """
     load_env()
     available = set(configured_providers())
@@ -181,7 +185,7 @@ def live_gateway(
         routing=config,
         transports=transports,
         cache=ResponseCache(store=store),
-        tracer=tracer,
+        trace=trace,
         allow_fallback=allow_fallback,
     )
 

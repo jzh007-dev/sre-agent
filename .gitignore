@@ -19,3 +19,5 @@ build/
 .ruff_cache/
 .coverage
 htmlcov/
+# Per-investigation JSONL logs (W2 L4a) — run artefacts, not source.
+var/

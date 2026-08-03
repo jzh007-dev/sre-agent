@@ -171,7 +171,7 @@ sre-agent/
 
 | Module | May import | Fails on |
 |---|---|---|
-| `core/loop.py`, `core/investigation.py`, `core/events.py` | stdlib, `core/`, protocol modules | any concrete implementation — a provider adapter, a sink, an integration name |
+| `core/loop.py`, `core/investigation.py`, `core/events.py`, `core/trace.py` | stdlib, `core/`, protocol modules | any concrete implementation — a provider adapter, a sink, an integration name |
 | `core/harness.py` | the above plus each seam's `registry` | a concrete implementation behind a registry |
 
 This is what makes the Week 5 L7 claim ("adding integration #3 cost zero lines of Python") an invariant enforced on every commit rather than a number measured once. A candidate architecture whose boundaries are only described is indistinguishable from one whose boundaries leak; a boundary with a failing test is not.
@@ -388,21 +388,36 @@ Three distinct memory tiers, deliberately kept separate:
 
 ### 10. Observability of the agent itself
 
-**Current state, audited against the code rather than asserted** (2026-08-03): four
-instrument sources, **zero sinks**, three of them generated-and-discarded, and no
-timing anywhere. `Gateway.tracer` defaults to a no-op; `transport.Attempt`'s error and
-delay are written and never read; `run_to_completion` produces the whole event stream
-and keeps only the terminal event. A failed run currently leaves behind nothing but an
-`Aborted` reason string. The full audit and the decision to fix it first are
-[TRADEOFFS §42](./TRADEOFFS.md#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired);
-it lands as W2 L4a, ahead of the dedup and correlation work that depends on it.
+**This section began as an audit rather than a design** (2026-08-03), and the audit is
+worth keeping visible: it found four instrument sources and **zero sinks**, three of
+them generated-and-discarded, and no timing anywhere in `agent/`. `Gateway.tracer`
+defaulted to a no-op; `transport.Attempt`'s error and delay were written and never
+read; `run_to_completion` produced the whole event stream and kept only the terminal
+event. A failed run left behind nothing but an `Aborted` reason string, in a project
+whose thesis is evidence.
 
-**One id.** The trace id is adopted from the alert's `correlation_id`, which joins a
-spine Week 1 already ships: `mock/services/_shared/observability.py` propagates it by
-header and stamps it on every JSON log line, and the golden alerts carry one in
-`commonAnnotations`. Threading it through tool calls into the actual queries is the
-difference between "the agent was slow" and "the agent's fourth query was slow, and
-here is what ClickHouse was doing" — answerable from the observed system's own logs.
+**W2 L4a closed all seven rows** — see the before/after table in
+[TRADEOFFS §42](./TRADEOFFS.md#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired),
+which also carries the measured cost of doing so (instrumentation 0.017 ms per
+investigation; the durable log 1.147 ms, being 98% of the total). It was sequenced
+ahead of the dedup and correlation work in L4b/L4c because both have decisions that
+need somewhere to be recorded.
+
+**Two ids, one join.** `trace_id` is the investigation id, unique per run. The alert's
+`correlation_id` is carried as an attribute on every span and in the JSONL header — it
+joins a spine Week 1 already ships, since `mock/services/_shared/observability.py`
+propagates that id by header and stamps it on every JSON log line, and every golden
+alert carries one in `commonAnnotations`. Grepping one id across the agent's spans and
+the services' logs is the difference between "the agent was slow" and "the agent's
+fourth query was slow, and here is what ClickHouse was doing".
+
+Adopting the correlation_id *as* the trace id was the original design and was
+rejected on contact with two cases that produce several investigations for one alert:
+a golden case rerun, and L4b's R3 rule (recurrence after a delivered report). Both
+would have collided on the id, and Tempo would render two runs as one trace. A tool
+reaching a real backend in W3 L2 reads the id from the ambient trace
+(`current_correlation_id()`), so tagging a query costs no second reserved keyword
+beside `window`.
 
 **Four span levels, each with a duration**:
 
@@ -419,16 +434,25 @@ investigation (trace root)
 Without durations, `p90 latency`, `time_to_first_verdict` and the critical-path profile
 are all declared metrics that cannot be computed. Retry *count* plus duration
 distinguishes "the provider was slow" from "we retried three times"; the count alone
-does not.
+does not. `srectl replay <id>` prints this tree from the log, with the profile split
+between provider time, tool time, and our own overhead.
 
-**Four sinks**:
+Parenting is **ambient**, through a ContextVar — which is what lets the gateway nest an
+`llm.call` under the current turn without the `LLM` protocol growing a parameter, and
+mirrors the mock's use of a ContextVar as an async-safe MDC. Two subtleties are load-bearing
+rather than incidental; see [TRADEOFFS §42](./TRADEOFFS.md#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired).
+
+**Four sinks.** Emission is at the instrumented call site — a gateway call cannot reach
+a provider without producing a span, which is what makes coverage structural rather
+than remembered. Where those spans *go* is `Trace.sinks`, so adding a sink touches no
+instrumented code:
 
 | Sink | For | Lands |
 |---|---|---|
-| JSONL per investigation | replay, post-mortem, durability | W2 L4a |
-| Langfuse Cloud | LLM-call view, prompt versions — wired at the gateway, so coverage is structural rather than remembered | W2 L8 |
+| JSONL per investigation | replay, post-mortem, durability | W2 L4a — done |
+| Structured logs | grep, correlated by `correlation_id` in the same shape the mock services log | W2 L4a — done |
+| Langfuse Cloud | LLM-call view, prompt versions | W2 L8 |
 | OTEL → Tempo | spans, alongside the mock's own Tempo, so the investigation and the incident appear in one trace view | W3 L3 |
-| Structured logs | grep, correlated by trace id | W2 L4a |
 
 **Runaway detection.** Six ceilings already guarantee a runaway *stops*: `max_turns`,
 `max_tool_calls`, `per_tool_calls`, per-currency `max_cost`, the provider circuit
@@ -437,7 +461,10 @@ breaker, and `max_tokens` truncation. What is missing is *diagnosis*:
 the same query twelve times are indistinguishable. W2 L4a adds a **model-side circuit
 breaker** keyed on `(tool_name, args_hash)` — symmetric with the provider one — which
 returns an error result carrying the previous answer rather than aborting, so the run
-can recover.
+can recover. A refused call still counts toward `max_tool_calls`, or a stuck model
+would spin for free; and the root span records `repeated_calls`, which is what turns
+`max_turns` from a verdict into a diagnosis. `ToolBudget.repeat_tool_calls = 0`
+disables it, for eval runs measuring the agent rather than the guard.
 
 Note the coupling worth naming: the agent's own telemetry flows into the same
 Prometheus, and from W3 the same Tempo, that it diagnoses. Fine at Tier 1.5 and good

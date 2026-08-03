@@ -8,9 +8,10 @@ in a code review.
 
 Two tiers:
 
-- **pure core** — `loop.py`, `investigation.py`, `events.py` may import stdlib,
-  their siblings, and protocol/policy modules. Naming any concrete implementation
-  fails the build.
+- **pure core** — `loop.py`, `investigation.py`, `events.py`, `trace.py` may import
+  stdlib, their siblings, and protocol/policy modules. Naming any concrete
+  implementation fails the build. `trace.py` is here rather than among the seams
+  because a *sink* is pluggable and the span model is not.
 - **harness** — may additionally reach each seam's registry, since dispatching
   through registries is its job. Naming a concrete implementation still fails.
 
@@ -45,7 +46,7 @@ HARNESS_EXTRA_ALLOWED = (
     "agent.store.jsonl",
 )
 
-PURE_CORE = ("loop.py", "investigation.py", "events.py")
+PURE_CORE = ("loop.py", "investigation.py", "events.py", "trace.py")
 HARNESS = ("harness.py",)
 
 
@@ -55,6 +56,12 @@ def _agent_imports(path: pathlib.Path) -> list[tuple[str, int]]:
     Relative imports are resolved against the file's package so that
     `from ..llm.types import X` inside `agent/core/loop.py` is reported as
     `agent.llm.types` rather than as something unclassifiable.
+
+    `from . import trace` needs its own case. With no `module`, every name is by
+    definition a submodule, so each is resolved individually — otherwise the form
+    reports as a bare `agent.core` and the classifier can say nothing about *what*
+    was imported, which is both a false positive on a legal sibling import and no
+    information at all on an illegal one.
     """
     tree = ast.parse(path.read_text(), filename=str(path))
     package = ".".join(path.relative_to(REPO).with_suffix("").parts[:-1])
@@ -69,11 +76,17 @@ def _agent_imports(path: pathlib.Path) -> list[tuple[str, int]]:
             if node.level:
                 parts = package.split(".")
                 base = parts[: len(parts) - (node.level - 1)] if node.level > 1 else parts
-                target = ".".join([*base, node.module] if node.module else base)
             else:
-                target = node.module or ""
-            if target.startswith("agent"):
-                found.append((target, node.lineno))
+                base = (node.module or "").split(".")
+
+            if node.module is None:
+                targets = [".".join([*base, alias.name]) for alias in node.names]
+            else:
+                targets = [".".join([*base, node.module]) if node.level else node.module]
+
+            for target in targets:
+                if target.startswith("agent"):
+                    found.append((target, node.lineno))
     return found
 
 

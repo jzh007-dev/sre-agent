@@ -96,14 +96,14 @@ Fill this file as the project evolves. Every checkbox is a piece of interview ev
 - [ ] **Two-stage output** — preliminary verdict streamed within seconds, full report after
 - [ ] **Speculative retrieval** in harness ② (prefetch similar investigations async, off the critical path)
 - [ ] **TTFT vs total latency** measured separately
-- [ ] **Critical path profile** — where the 30 seconds go
+- [~] **Critical path profile** — where the 30 seconds go. Span durations and `Trace.profile()` land in W2 L4a; the offline split is 0.017 ms instrumentation / 1.147 ms durable log per investigation. A real provider-vs-tool split needs live tools (W3 L2)
 - [ ] Data point ready: "p50 / p90 / p99 latency: _____ / _____ / _____ seconds"
 
 ## 9. Observability & debugging
 
 - [ ] **Langfuse trace** on every LLM + tool call — verified
 - [ ] **Decision-chain visualization** available (hypothesis → evidence → verdict)
-- [ ] **Replay capability**: any past investigation re-runnable from its JSONL log
+- [x] **Replay capability**: `srectl replay <id>` — span tree with durations, timing profile, and `messages` rebuilt from the event stream (reconstruction asserted exact against a live run)
 - [ ] **Error taxonomy** defined: hallucination / tool_error / data_missing / prompt_bug
 - [ ] **Error rate per class** tracked over time
 - [ ] **Prompt version** stamped on every trace
@@ -159,7 +159,7 @@ See [SECURITY.md](./SECURITY.md) for the full threat model and five-layer defens
 - [ ] **Per-incident cost cap** enforced with degradation path
 - [ ] **Max tool calls** enforced (20 across phases)
 - [ ] **Max iterations per node** enforced (5)
-- [ ] **Same-tool-same-args circuit breaker** implemented
+- [x] **Same-tool-same-args circuit breaker** implemented — W2 L4a, keyed on `(tool_name, args_hash)`; the 3rd identical call returns the previous result plus a nudge rather than aborting
 - [ ] Data point: cap-trip rate; false-trip rate on normal cases
 
 ### 10.7 Adversarial eval coverage

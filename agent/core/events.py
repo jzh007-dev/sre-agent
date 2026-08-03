@@ -18,7 +18,7 @@ so alert mode pays nothing for the machinery chat needs.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Union
+from typing import Any, Callable, Union
 
 
 @dataclass(frozen=True)
@@ -97,3 +97,16 @@ Event = Union[TurnStarted, TextDelta, ToolCalled, ToolReturned, Done, Aborted]
 
 #: The two events that end a run. Exactly one of them is emitted per run.
 TERMINAL_EVENTS = (Done, Aborted)
+
+#: Where events go when a caller does not consume the stream itself.
+#:
+#: `run_to_completion` takes one of these because until W2 L4a it generated the
+#: whole stream and kept only the terminal event — the audit in
+#: [TRADEOFFS §42](../../TRADEOFFS.md#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired)
+#: lists that as one of three instruments that were produced and discarded.
+#:
+#: A plain callable, and **synchronous**: a sink is an append or a write, and making
+#: it awaitable would let a slow sink add latency to the investigation it is only
+#: supposed to be watching. Serialization deliberately lives in the store rather
+#: than here, so `core/` keeps knowing nothing about file formats.
+EventSink = Callable[[Event], None]

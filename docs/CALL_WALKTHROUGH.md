@@ -1,11 +1,12 @@
-# Call Walkthrough — one LLM call, eight ways
+# Call Walkthrough — one LLM call, nine ways
 
 What actually happens between an alert arriving and a provider answering, and which
 file decides what. Every scenario below is covered by a test, named at the end of
 each one, so this document describes behaviour rather than intent.
 
-Numbers marked **(live)** are from a real DeepSeek run on 2026-08-02; the rest are
-from the test suite.
+Numbers marked **(live)** are from a real DeepSeek run on 2026-08-02. Scenario 9 is
+`srectl replay` output from an actual recorded run, stub-backed and offline. Everything
+else is from the test suite.
 
 ---
 
@@ -282,31 +283,68 @@ instrument, sized for an eval run.
 
 ---
 
-## What this document cannot yet show you
+## 9. A repetition loop — and what a recorded run looks like
 
-Every trace above is reconstructed from the test suite, not from a recorded run —
-because **there is nowhere for a run to be recorded**. An audit against the code found
-four instrument sources and zero sinks:
+Until W2 L4a every trace above was reconstructed from the test suite rather than from
+a recorded run, because there was nowhere for a run to be recorded: four instrument
+sources, zero sinks, no timing. Scenario 4's retry was *known* to have happened because
+a test asserted the delay list, not because anything recorded it.
 
-| Instrument | State |
-|---|---|
-| `Gateway.tracer` | defaults to a no-op |
-| `transport.Attempt` (`error`, `delay_before`) | written, never read — only `len(attempts)` is used |
-| Loop event stream | fully generated, then discarded by `run_to_completion` |
-| Timing | **absent entirely** — no durations anywhere in `agent/` |
+That is now readable off disk. A model repeating one query, replayed from its log —
+note the identical `args_hash` on the first three tool calls, and the third refused:
 
-So today a failed investigation leaves behind an `Aborted` reason string and nothing
-else. Scenario 4's retry, for instance, is *known* to have happened because a test
-asserts the delay list — not because a trace recorded it.
+```
+$ .venv/bin/python -m srectl replay inv_3ad442f028da
 
-**W2 L4a fixes this** and is deliberately sequenced before the dedup and correlation
-work, because those decisions have to be recorded somewhere. Once it lands, this
-document gets a ninth scenario it cannot honestly have now: **a repetition loop** —
-the model calling the same tool with identical arguments until a ceiling fires. Worth
-noting what already happens there, because it was luck rather than design: an identical
-repeated call hits the response cache, so `money_spent` stays flat, but `budget_charged`
-still grows (a hit replays the original cost), and the budget gate reads
-`budget_charged` — so the loop *is* caught. Under the naive "cache hits are free"
-design it would have run for free until `max_turns`.
+investigation inv_3ad442f028da   run 1 of 1
+  trigger        alert
+  correlation_id gs-res-001-redis-oom
+  window         2026-07-27T11:30:00+00:00 .. 2026-07-27T12:05:00+00:00
+
+      2.56ms  investigation alert
+        0.49ms  turn #0 tool_use
+          0.04ms  tool.call query_metrics 9a363234a34a
+        0.35ms  turn #1 tool_use
+          0.03ms  tool.call query_metrics 9a363234a34a
+        0.33ms  turn #2 tool_use
+          0.01ms  tool.call query_metrics 9a363234a34a REFUSED (repeat)
+        0.51ms  turn #3 tool_use
+          0.02ms  tool.call query_logs 70c87e5e4483
+          0.01ms  tool.call search_runbook 27302f96fab2
+        0.56ms  turn #4 tool_use
+          0.02ms  tool.call submit_report 217ec73910cb
+
+  outcome  Done — redis rejected session writes under memory pressure  (confidence: high)
+  profile  elapsed 2.6ms · llm 0.0ms (0.0%) · tools 0.1ms (5.4%) · overhead 2.4ms
+  calls    0 llm (0 cached) · 6 tool · 0 attempts (0 retried)
+  stuck    1 identical call(s) refused by the repeat guard
+```
+
+Two things in that output are the point of the lesson. **`REFUSED (repeat)`** is the
+model-side circuit breaker: the third identical `(tool, args_hash)` call comes back as
+an error result carrying the previous answer and a nudge, so the run recovers and goes
+on to deliver — where before, twelve different queries and the same query twelve times
+were indistinguishable and both reported `max_turns`. And **`stuck`** is the line that
+makes a runaway diagnosable rather than merely stopped.
+
+Worth recording what already protected against the loop, because it was luck rather
+than design: an identical repeated call hits the response cache, so `money_spent` stays
+flat, but `budget_charged` still grows (a hit replays the original cost), and the budget
+gate reads `budget_charged` — so the loop *was* caught. Under the naive "cache hits are
+free" design it would have run for free until `max_turns`.
+
+Routed through the gateway instead of a stub, the same command shows the two lower span
+levels — including a retry, which is the distinction the retry count alone cannot make:
+
+```
+        1.29ms  turn #0 tool_use
+          0.48ms  llm.call deepseek-v4-flash 2 attempts 0.00173 CNY
+            0.02ms  attempt #1 Timeout  [error]
+            0.00ms  attempt #2 after 500.0ms backoff
+          0.04ms  tool.call query_metrics 76eb5234db0d
+```
+
+`--messages` rebuilds the conversation from the event stream — the same reconstruction
+chat resume depends on, asserted exact against a live run in `tests/store/test_jsonl.py`.
 
 See [TRADEOFFS §42](../TRADEOFFS.md#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired).

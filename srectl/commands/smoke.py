@@ -23,6 +23,7 @@ import json
 from datetime import datetime, timezone
 
 from agent.core.investigation import Investigation, ToolBudget, Window
+from agent.core.trace import Trace
 from agent.llm.clients import env_summary, live_gateway, load_env, smoke_routing
 from agent.llm.cost import Ledger
 from agent.llm.provider_catalog import MODELS, model
@@ -70,10 +71,13 @@ def _read_balance(provider: str) -> tuple[float, str] | None:
 
 
 async def _one_provider(model_id: str, stream: bool) -> dict:
-    traces: list[dict] = []
+    # No loop above us here, so this is the gateway's fallback trace rather than an
+    # ambient one. It gives smoke the real per-attempt latency of a live provider,
+    # which is the one number a stub run cannot produce.
+    trace = Trace(trace_id=f"trace_smoke_{model_id}")
     gateway = live_gateway(
         routing=smoke_routing(model_id),
-        tracer=traces.append,
+        trace=trace,
         # Fallback off: this is a check of one provider, and a silent switch would
         # make the report describe a provider we did not intend to test.
         allow_fallback=False,
@@ -142,7 +146,12 @@ async def _one_provider(model_id: str, stream: bool) -> dict:
             len(entries) > 1 and entries[1].usage.cache_read_tokens > 0
         ),
         "ledger": ledger.summary(),
-        "traces": len(traces),
+        "spans": len(trace.spans),
+        # Per-attempt duration, which is what separates "the provider was slow" from
+        # "we retried". Unavailable before W2 L4a: there was no timing in agent/.
+        "llm_call_ms": [
+            round(s.duration_ms or 0.0, 1) for s in trace.spans if s.name == "llm.call"
+        ],
         "streamed_chunks": streamed_chunks,
     }
 

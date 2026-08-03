@@ -17,13 +17,14 @@ Two things are deliberately owned here rather than delegated to the provider SDK
   moot, but running 30 golden cases concurrently will certainly hit 429. That
   framing is why a semaphore is sufficient and a token bucket would be theatre.
 
-Everything time-related is injected (`sleeper`, `now`) so the retry and breaker
-paths are tested offline with no network and no real delays.
+Everything time-related is injected (`sleeper`, `now`, `clock`) so the retry,
+breaker and duration paths are tested offline with no network and no real delays.
 """
 from __future__ import annotations
 
 import asyncio
 import random
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import AsyncIterator, Awaitable, Callable, Protocol, Union
@@ -150,7 +151,10 @@ class Attempt:
 
     Kept because "the provider was slow" and "we retried four times" look identical
     in a latency number, and the retry count is one of the few things that explains
-    a p90 outlier.
+    a p90 outlier — but only with `duration_ms` alongside it. Until L4a the count
+    was the only field the gateway read, so the distinction this type exists to make
+    was recorded and then thrown away
+    ([TRADEOFFS §42](../../TRADEOFFS.md#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired)).
     """
 
     attempt: int
@@ -159,6 +163,19 @@ class Attempt:
     error: str | None = None
     error_class: str | None = None
     delay_before: float = 0.0
+    #: Time in the adapter, excluding `delay_before`. The two are separate because
+    #: backoff is our latency and the send is the provider's, and a total that mixed
+    #: them would make our own retry curve look like a slow provider.
+    duration_ms: float = 0.0
+
+
+#: Called as each attempt completes, successful or not.
+#:
+#: A per-call parameter rather than a field on `Transport`: one transport is shared
+#: by every investigation hitting that provider, so a field would race. It also
+#: catches the failure path, where the attempt list is otherwise lost with the
+#: raised exception — which is the path worth tracing.
+AttemptSink = Callable[[Attempt], None]
 
 
 class Adapter(Protocol):
@@ -218,6 +235,9 @@ class Transport:
     max_concurrency: int = 4
     sleeper: Sleeper = asyncio.sleep
     rng: random.Random = field(default_factory=lambda: random.Random(0))
+    #: Injected like `sleeper` and `breaker.now`, so an attempt's duration is exact
+    #: in a test rather than whatever the machine was doing that second.
+    clock: Clock = time.perf_counter
 
     _semaphore: asyncio.Semaphore | None = field(default=None, init=False, repr=False)
 
@@ -228,10 +248,24 @@ class Transport:
             self._semaphore = asyncio.Semaphore(self.max_concurrency)
         return self._semaphore
 
-    async def call(self, request: LLMRequest) -> tuple[SendResult, list[Attempt]]:
+    async def call(
+        self,
+        request: LLMRequest,
+        on_attempt: AttemptSink | None = None,
+    ) -> tuple[SendResult, list[Attempt]]:
         """Send with retries. Raises the last `ProviderError`, or
-        `ProviderUnavailable` if the breaker is open before we even try."""
+        `ProviderUnavailable` if the breaker is open before we even try.
+
+        `on_attempt` fires as each attempt finishes, so the caller sees every one
+        even when the call ultimately raises and the returned list never arrives.
+        """
         attempts: list[Attempt] = []
+
+        def finish(record: Attempt, started: float) -> None:
+            record.duration_ms = (self.clock() - started) * 1000.0
+            attempts.append(record)
+            if on_attempt is not None:
+                on_attempt(record)
 
         if not self.breaker.allows():
             raise ProviderUnavailable(
@@ -254,13 +288,16 @@ class Transport:
                 model_id=request.model_id,
                 delay_before=delay,
             )
+            # Started after the backoff sleep: `delay_before` already carries that,
+            # and double-counting it would attribute our own wait to the provider.
+            started = self.clock()
             try:
                 async with self._sem():
                     result = await self.adapter.send(request)
             except ProviderError as exc:
                 record.error = str(exc)
                 record.error_class = type(exc).__name__
-                attempts.append(record)
+                finish(record, started)
                 self.breaker.record_failure(exc)
                 last = exc
                 if not exc.retryable:
@@ -268,7 +305,7 @@ class Transport:
                     raise
                 continue
             else:
-                attempts.append(record)
+                finish(record, started)
                 self.breaker.record_success()
                 return result, attempts
 

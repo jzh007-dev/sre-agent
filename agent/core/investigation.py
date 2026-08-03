@@ -16,6 +16,7 @@ buys four things that are each expensive to retrofit:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from collections import Counter
@@ -36,6 +37,26 @@ DEFAULT_LOOKAHEAD = timedelta(minutes=5)
 #: Triggers whose investigations must finish by calling a terminal tool. Chat is
 #: excluded: answering a question and stopping is a legitimate ending there.
 REPORT_REQUIRED_TRIGGERS: frozenset[str] = frozenset({"alert", "patrol"})
+
+#: How much of a tool result is retained for the repeat guard to hand back. Enough
+#: to be useful, short enough that keeping one per distinct call costs nothing.
+PREVIOUS_RESULT_CHARS = 2_000
+
+
+def args_hash(arguments: Mapping[str, Any]) -> str:
+    """A stable short digest of a tool call's arguments.
+
+    Two calls are "the same call" when the tool and this digest match. `sort_keys`
+    is what makes that true regardless of the order the model emitted the keys in,
+    and `default=str` keeps an unexpected value type from raising inside the guard —
+    a hash that occasionally over-distinguishes is a missed detection, but one that
+    raises would take down the dispatch path this exists to protect.
+
+    Twelve hex characters: collision-irrelevant at forty calls per investigation, and
+    short enough to read in a span attribute or a replay tree.
+    """
+    blob = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass(frozen=True)
@@ -98,6 +119,11 @@ class ToolBudget:
     )
     #: Per-tool caps, e.g. {"query_logs": 6}. Absent tool names are uncapped.
     per_tool_calls: Mapping[str, int] = field(default_factory=dict)
+    #: The model-side circuit breaker's threshold: which *identical* call, counting
+    #: from one, is refused. 3 means two identical calls run and the third does not.
+    #: A ceiling like the others, so it belongs here — but unlike the others it
+    #: degrades the call rather than ending the investigation. See `repeat_guard`.
+    repeat_tool_calls: int = 3
 
     def ceiling_for(self, currency: str) -> float | None:
         """The ceiling in one currency, or None if none is configured."""
@@ -118,6 +144,24 @@ class Investigation:
     messages: list[Message] = field(default_factory=list)
     turn: int = 0
     tool_calls: Counter[str] = field(default_factory=Counter)
+    #: The observed system's own id for this incident, adopted from the alert rather
+    #: than invented. Week 1 already propagates it by header and stamps it on every
+    #: JSON log line, so carrying it makes "the agent's fourth query was slow"
+    #: answerable from ClickHouse's own logs. Empty for chat and patrol.
+    #:
+    #: Deliberately *not* the investigation id: reruns of one golden case, and
+    #: L4b's R3 rule, both produce several investigations sharing one correlation
+    #: id. `id` identifies our enquiry; this identifies their incident.
+    correlation_id: str = ""
+    #: (tool_name, args_hash) → count. The name-keyed counter above cannot tell
+    #: twelve different queries from the same query twelve times, which is the gap
+    #: [TRADEOFFS §42](../../TRADEOFFS.md#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired)
+    #: records: a runaway already stops, but the recorded reason says `max_turns`
+    #: either way.
+    repeat_calls: Counter[tuple[str, str]] = field(default_factory=Counter)
+    #: (tool_name, args_hash) → a truncated copy of what that call returned, so a
+    #: refusal can hand the previous answer back instead of just saying no.
+    _results: dict[tuple[str, str], str] = field(default_factory=dict, repr=False)
 
     @property
     def requires_report(self) -> bool:
@@ -133,8 +177,58 @@ class Investigation:
         """
         self.messages.append(Message(role="user", content=[TextBlock(text=text)]))
 
-    def record_tool_call(self, name: str) -> None:
+    def record_tool_call(
+        self, name: str, args_hash: str = "", result: str | None = None
+    ) -> None:
+        """Count a dispatched call, by name for the budget and by (name, args) for
+        the repeat guard.
+
+        `result` is kept truncated: it exists only to be handed back on a refusal,
+        and a full ClickHouse page per distinct call would multiply the memory the
+        investigation holds for no benefit. Bounded overall by `max_tool_calls`.
+        """
         self.tool_calls[name] += 1
+        if args_hash:
+            key = (name, args_hash)
+            self.repeat_calls[key] += 1
+            if result is not None:
+                self._results[key] = result[:PREVIOUS_RESULT_CHARS]
+
+    def repeat_guard(self, name: str, args_hash: str) -> str | None:
+        """The refusal payload if this exact call has been made too often, else None.
+
+        Symmetric with the provider circuit breaker by design, and deliberately
+        *recoverable* where that one is fatal: rather than aborting, the call comes
+        back as an error result carrying the previous answer and a nudge. Same
+        pattern as `safe_dispatch` turning a failed backend into evidence — the
+        model can route around it on its next turn, and an investigation that was
+        merely stuck does not become an investigation that failed.
+
+        Returns JSON, matching `dispatch._error`, so the model reads structure
+        rather than prose.
+        """
+        limit = self.budget.repeat_tool_calls
+        if limit <= 0:
+            return None
+        key = (name, args_hash)
+        already = self.repeat_calls[key]
+        if already + 1 < limit:
+            return None
+        previous = self._results.get(key)
+        payload: dict[str, Any] = {
+            "error": "repeated identical call",
+            "tool": name,
+            "args_hash": args_hash,
+            "identical_calls": already + 1,
+            "hint": (
+                f"you have already called {name} with identical arguments "
+                f"{already} time(s); the result has not changed. Use the previous "
+                f"result below, or query something different."
+            ),
+        }
+        if previous is not None:
+            payload["previous_result"] = previous
+        return json.dumps(payload, ensure_ascii=False)
 
     def budget_exhausted(self) -> str | None:
         """Return a human-readable reason if any ceiling is hit, else None.
@@ -179,6 +273,7 @@ class Investigation:
             window=Window.around(anchor),
             budget=budget or ToolBudget(),
             integration=integration,
+            correlation_id=_alert_correlation_id(alert),
         )
         inv.add_user_text(f"<alert>\n{json.dumps(strip_fixture_metadata(alert), ensure_ascii=False, indent=2)}\n</alert>")
         return inv
@@ -198,6 +293,27 @@ def strip_fixture_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
     underscore-prefixed is fixture bookkeeping and never crosses into a prompt.
     """
     return {k: v for k, v in payload.items() if not k.startswith("_")}
+
+
+def _alert_correlation_id(alert: Mapping[str, Any]) -> str:
+    """The alert's own correlation id, from `commonAnnotations`.
+
+    Read from the annotation rather than recomputed, for the same reason the
+    fingerprint will be taken from AlertManager in L4b: a second definition of an
+    identifier is a second thing that can disagree. Every Week-1 golden fixture
+    carries one, and `mock/services/_shared/observability.py` propagates the same id
+    by header, which is what makes the join possible at all.
+
+    Empty when absent — the trace still works, it just cannot be joined to the
+    observed system's logs, and that is worth reading as a missing annotation on the
+    alert rule rather than as an agent-side failure.
+    """
+    annotations = alert.get("commonAnnotations")
+    if isinstance(annotations, Mapping):
+        value = annotations.get("correlation_id")
+        if isinstance(value, str):
+            return value
+    return ""
 
 
 def _alert_start_time(alert: Mapping[str, Any]) -> datetime | None:

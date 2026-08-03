@@ -7,10 +7,10 @@ Subcommands land with the lesson that needs them:
 
 - `smoke`   — W2 L3b: one live call per credentialled provider, verify usage and cost
 - `prices`  — W2 L3b: verify the price table against the provider's own invoice
+- `replay`  — W2 L4a: span tree, timing profile, and rebuilt messages from the JSONL log
 - `trigger` — W2 L7: run a golden case end to end
 - `chat`    — post-W5
 - `patrol`  — deferred ([§31](../TRADEOFFS.md#31-patrol-stays-a-stub-until-its-value-proposition-is-settled))
-- `replay`  — W2 L7: rebuild `messages` from an investigation's JSONL log
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ USAGE = """usage: srectl <command> [options]
 commands:
   smoke     one live call per credentialled provider; verify usage + cost   (W2 L3b)
   prices    verify the price table against the provider's billing CSV export (W2 L3b)
+  replay    span tree, timing profile and messages from a JSONL log        (W2 L4a)
   trigger   run a golden case end to end                                   (W2 L7)
-  replay    rebuild an investigation from its JSONL log                    (W2 L7)
   chat      interactive session                                            (post-W5)
   patrol    scheduled inspection                                           (deferred)
 """
@@ -46,7 +46,12 @@ def main(argv: list[str] | None = None) -> int:
 
         return prices_main(rest)
 
-    if command in ("trigger", "replay", "chat", "patrol"):
+    if command == "replay":
+        from .commands.replay import main as replay_main
+
+        return replay_main(rest)
+
+    if command in ("trigger", "chat", "patrol"):
         print(f"`srectl {command}` is not implemented yet — see docs/ROADMAP.md")
         return 2
 
