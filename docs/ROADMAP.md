@@ -261,7 +261,9 @@ Reviewed 2026-08-01. Items 1-6 were identified when the plan was re-scoped; 9-14
 **Session date**: 2026-08-04
 **Last completed**: Week 2 L4b — trigger registry and layered dedup (363 tests green). See the L4b section at the end of this pointer.
 
-Key events this session — **Week 2-7 re-planned**, no code changes:
+The subsections below are in chronological order; **the last one is the live handoff.**
+
+Key events on **2026-08-01** — **Week 2-7 re-planned**, no code changes:
 
 - Named the five pillars (harness / loop / gateway / RAG / integrations) and the **seam rule**: adding a trigger, integration, sink, or provider must not touch `loop.py` or `harness.py`.
 - **Harness recognized as a missing layer.** The system is not a bare agent loop; it is a deterministic 6-step pipeline *containing* one. Steps ①②⑥ vary by trigger; ③④⑤ are identical across alert / chat / patrol. New [TRADEOFFS §23](../TRADEOFFS.md#23-harness-deterministic-pipeline-around-the-agent-loop-refines-22).

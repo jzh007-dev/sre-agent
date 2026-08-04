@@ -21,3 +21,8 @@ build/
 htmlcov/
 # Per-investigation JSONL logs (W2 L4a) — run artefacts, not source.
 var/
+
+# Local Claude Code workspace: the next-lesson skill lives here. The working
+# protocol it encodes is duplicated in docs/ROADMAP.md (Session handoff protocol),
+# which is the tracked source of truth.
+.claude/
