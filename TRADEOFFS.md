@@ -729,6 +729,32 @@ Six ceilings already guarantee that a runaway **stops**: `max_turns`, `max_tool_
 
 ---
 
+## 43. Operator console: hand-write the driving surface, never the trace viewer
+
+- **Decision**: build a thin web console that *drives* the system and shows it running — trigger a golden case, chat, watch the span tree grow, watch which dedup rule fired, watch cost and budget move. Do **not** hand-write a trace explorer; that is Langfuse's and Tempo's job.
+- **The split, and why it is not arbitrary**:
+
+| Surface | Who provides it | Why |
+|---|---|---|
+| Driving the system, live | **us** | Nothing off-the-shelf can start an investigation, hold a chat with it, or explain a dedup decision. There is no product to buy here. |
+| Deep-diving one trace after the fact | Langfuse / Tempo | A hand-rolled span explorer is a mock of a mature tool, which is exactly what [§20](#20-middleware-specific-knowledge-lives-in-rag-not-in-agent-code-or-cases)'s "real components over mocks" preference exists to prevent. |
+
+- **What prompted it**: an audit on 2026-08-04 found the **loop's event stream has no consumer**. `TurnStarted` / `TextDelta` / `ToolCalled` / `ToolReturned` are generated on every run and `run_to_completion` collapses them to one terminal event. That is the same produced-then-discarded pattern [§42](#42-traceability-one-id-four-sinks--and-an-honest-audit-of-what-is-currently-wired) documented for spans, one layer up — and the events were added in W2 L2 specifically so chat could stream and patrol could fan out, neither of which had arrived to consume them.
+- **Alternatives**:
+  - (A) Wire Langfuse only, and drive everything from the CLI.
+  - (B) Build a full trace UI of our own.
+  - (C) No UI at all until W7, as originally planned.
+- **Why not (A)**: it makes the system observable but not *drivable* — you can see a run you already started, and every experiment stays a shell command. Langfuse is still wanted, and is still an open gap. **Why not (B)**: two weeks of work to be worse than a free product. **Why not (C)**: the dashboard was scheduled for W7 while the numbers it would display are produced from W2 L3 onward, so for five weeks every cost and latency figure lives only in a commit message.
+- **The condition that makes it a deliverable rather than decoration**: **it displays measured values or it does not ship the tile.** Cost, elapsed, p90, cache hit rate, budget consumed and the dedup decision all come from the ledger and the trace. A placeholder number on a dashboard is worse than an absent one — it is [§30](#30-unmeasured-targets-are-labelled-hypotheses)'s failure mode with a nicer font.
+- **Scope fence, set deliberately tight**: one HTML file, one JS file, `EventSource`, no npm. A node toolchain in a Python repo is operational cost with nothing to show for it, and a build step is one more thing that can be broken when the point is to demo in sixty seconds.
+- **The console must not become the only thing that can read our traces.** Agent-execution tracing is a crowded space — Langfuse, LangSmith, Arize Phoenix, W&B Weave, Braintrust, Traceloop — and they converge on **OpenTelemetry's GenAI semantic conventions** (`gen_ai.*` attributes on LLM spans). Our `Span.attrs` is an open dict precisely so it can carry them. So the rule is: **emit attribute names from the convention, not names of our own invention**, and the console becomes *one* consumer of a standard trace rather than the reason the trace has that shape.
+
+  That is worth more than the page is. "I built a trace viewer" is a weekend; "the agent emits standards-conformant telemetry, so Langfuse, Phoenix or a plain Tempo instance can all read it, and our console is just the live view" is the version an SRE interviewer can check.
+
+  **Unverified as written**: the exact attribute set could not be fetched from this environment (`opentelemetry.io` unreachable), and the GenAI conventions were still marked experimental at the model's knowledge cutoff, meaning names may have moved. So the mapping is *not* written from memory into the code — W2 L6b records the attributes we currently emit, and **W3 L3 verifies them against the published spec** when the OTel SDK goes in, renaming ours to match. Recording a convention we did not check would be [§30](#30-unmeasured-targets-are-labelled-hypotheses)'s failure mode with a standards logo on it.
+- **Cost**: a UI is a second product and a permanent maintenance surface — every new event type will want an affordance. Accepted because the alternative was a project whose progress is visible only as a test count. Re-examined if console work ever displaces a step that ships a number.
+- **Reconsider when**: Langfuse's own UI turns out to cover the driving case too (it does not today — it is a read-only observability product), or the console starts growing features that are not backed by a measurement.
+
 ## Meta-decisions
 
 ### Documentation-first, not code-first
