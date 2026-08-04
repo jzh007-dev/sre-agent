@@ -1,7 +1,12 @@
-"""Investigation, Window, and the fixture-metadata guard."""
+"""Investigation and Window — the trigger-agnostic kernel.
+
+The fixture-metadata guard and everything else that had to know what an alert
+payload looks like moved to `tests/triggers/test_alert.py` in W2 L4b, following the
+code: `Investigation` is the noun all three entry modes share, and it should not be
+able to parse a webhook.
+"""
 from __future__ import annotations
 
-import json
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -11,8 +16,9 @@ from agent.core.investigation import (
     Investigation,
     ToolBudget,
     Window,
-    strip_fixture_metadata,
+    mint_id,
 )
+from agent.llm.types import Message, TextBlock, ToolResultBlock
 
 T0 = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
 
@@ -35,52 +41,54 @@ class TestWindow(unittest.TestCase):
         self.assertIn("2026-07-27T12:05", args["end"])
 
 
-class TestFixtureMetadataGuard(unittest.TestCase):
-    """Every golden case's alert.json carries a `_meta.purpose` that states the
-    root cause in prose. If that reached the prompt the agent would be graded on
-    reading the answer key, and every accuracy number in the project would be
-    meaningless while still looking healthy.
+class TestUserText(unittest.TestCase):
+    """`add_user_text` merges into a trailing user message.
+
+    Load-bearing for every mid-flight path — dedup R1 absorbing a repeat alert, a
+    `resolved` notification, a chat follow-up. Mid-investigation the last message is
+    the `user` message carrying that turn's `tool_result` blocks, and appending a
+    *second* consecutive user message produces a `messages` array that some providers
+    reject outright.
     """
 
-    def test_underscore_keys_are_dropped(self):
-        payload = {
-            "_meta": {"purpose": "root cause is Redis OOM"},
-            "_internal": "bookkeeping",
-            "alert_name": "HighErrorRate",
-        }
-        cleaned = strip_fixture_metadata(payload)
-        self.assertEqual(cleaned, {"alert_name": "HighErrorRate"})
+    def _inv(self) -> Investigation:
+        return Investigation(id="i", trigger="alert", window=Window.around(T0))
 
-    def test_the_answer_never_reaches_the_first_message(self):
-        inv = Investigation.from_alert(
-            {
-                "_meta": {"purpose": "root cause is Redis OOM under memory pressure"},
-                "alert_name": "HighErrorRate",
-                "commonLabels": {"service": "auth"},
-            },
-            t0=T0,
+    def test_first_text_creates_a_message(self):
+        inv = self._inv()
+        inv.add_user_text("hello")
+        self.assertEqual(len(inv.messages), 1)
+        self.assertEqual(inv.messages[0].role, "user")
+
+    def test_second_text_merges_rather_than_appending_a_user_turn(self):
+        inv = self._inv()
+        inv.add_user_text("one")
+        inv.add_user_text("two")
+        self.assertEqual(len(inv.messages), 1, "consecutive user messages are invalid")
+        self.assertEqual(len(inv.messages[0].content), 2)
+
+    def test_absorption_after_tool_results_keeps_the_results_first(self):
+        """Anthropic requires tool_result blocks at the start of a user message, so
+        the merge has to append after them rather than in front."""
+        inv = self._inv()
+        inv.add_user_text("<alert>…</alert>")
+        inv.messages.append(Message(role="assistant", content=[TextBlock(text="ok")]))
+        inv.messages.append(
+            Message(role="user", content=[ToolResultBlock(tool_use_id="t1", content="{}")])
         )
-        prompt = "".join(
-            getattr(b, "text", "") for msg in inv.messages for b in msg.content
-        )
-        self.assertNotIn("root cause", prompt.lower())
-        self.assertIn("HighErrorRate", prompt)
-        self.assertIn("<alert>", prompt)
+        inv.add_user_text("<alert-update>the condition resolved</alert-update>")
 
-    def test_real_golden_fixtures_are_all_scrubbed(self):
-        """Runs against the actual eval fixtures, so a future case that
-        reintroduces the leak fails here rather than in a silent eval."""
-        import pathlib
+        self.assertEqual(len(inv.messages), 3)
+        blocks = inv.messages[-1].content
+        self.assertEqual(blocks[0].type, "tool_result")
+        self.assertEqual(blocks[-1].type, "text")
 
-        root = pathlib.Path(__file__).resolve().parents[2] / "eval" / "golden"
-        cases = sorted(root.glob("*/alert.json"))
-        self.assertGreaterEqual(len(cases), 8, "expected the Week 1 golden cases")
-        for path in cases:
-            with self.subTest(case=path.parent.name):
-                raw = json.loads(path.read_text())
-                cleaned = strip_fixture_metadata(raw)
-                self.assertNotIn("_meta", cleaned)
-                self.assertTrue(cleaned, "scrubbing must not empty the payload")
+    def test_a_reply_after_an_assistant_turn_is_a_new_message(self):
+        inv = self._inv()
+        inv.add_user_text("first question")
+        inv.messages.append(Message(role="assistant", content=[TextBlock(text="answer")]))
+        inv.add_user_text("follow-up")
+        self.assertEqual([m.role for m in inv.messages], ["user", "assistant", "user"])
 
 
 class TestInvestigation(unittest.TestCase):
@@ -117,15 +125,9 @@ class TestInvestigation(unittest.TestCase):
         self.assertIn("2/2", reason)
 
     def test_ids_are_unique(self):
-        a = Investigation.from_alert({"alert_name": "x"}, t0=T0)
-        b = Investigation.from_alert({"alert_name": "x"}, t0=T0)
-        self.assertNotEqual(a.id, b.id)
-
-    def test_startsAt_is_used_as_t0_when_present(self):
-        inv = Investigation.from_alert(
-            {"alert_name": "x", "startsAt": "2026-07-27T12:00:00Z"}
-        )
-        self.assertEqual(inv.window.end, T0 + DEFAULT_LOOKAHEAD)
+        """`srectl replay`, the JSONL store and the trace all key on this id."""
+        self.assertNotEqual(mint_id(), mint_id())
+        self.assertTrue(mint_id().startswith("inv_"))
 
 
 if __name__ == "__main__":

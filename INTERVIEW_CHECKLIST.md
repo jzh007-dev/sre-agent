@@ -48,6 +48,17 @@ Fill this file as the project evolves. Every checkbox is a piece of interview ev
 - [ ] **Refute sub-loop** mandatory before delivery — `submit_report` returns `is_error` with no refutation on record
 - [ ] Data point ready: "% of hypotheses killed by refute; `precompute_override_rate`"
 
+### 3.1 Alert intake — what becomes one investigation
+
+- [x] **Division of labour with AlertManager stated**: it owns the notification layer (protecting a human's attention), we own the investigation layer (protecting a token budget) — [§38](./TRADEOFFS.md#38-alert-processing-alertmanager-owns-the-notification-layer-we-own-the-investigation-layer)
+- [x] **Dedup key consumed, not invented** — AlertManager's `groupKey`. Able to say *why not* `alerts[].fingerprint`: it hashes every label including `severity`, measured as `327b605fce1b794f` (P2) vs `3277605fce179078` (P1) for one condition, so keying on it silently disables the escalation and recurrence rules ([§38a](./TRADEOFFS.md#38a-the-dedup-key-is-groupkey-not-alertsfingerprint--measured-w2-l4b))
+- [x] **Ordered rule set, and the order is the policy** — R0 escalation never suppressed → R1 join → R2 drop → R3 recurrence reopens escalated → R4 burst hold → R5 new. Mutation-tested: demoting R0 below R2 fails 4 tests
+- [x] **Escalation mid-flight raises the running investigation in place** rather than forking a second budget; escalation has a ceiling
+- [x] **Suppressed / held / escalated counts recorded, not silent** — every decision carries its rule and reason to the investigation, the event stream and the log
+- [x] **Storm cap measured**: 40 distinct conditions under a cap of 8 → **9 investigations, not 40**. The first implementation changed the rule name and capped nothing; only a created-count caught it
+- [~] **Data point**: dedup decision cost **3.3-3.8 µs**, full pre-process **37 µs**; alerts-in → investigations-created over a real sequence is 8 → 4. Rate on production-shaped traffic needs W2 L8's eval runner
+- [ ] **Correlation across different conditions** (topology + onset ordering) — W2 L4c
+
 ## 4. Memory / retrieval
 
 - [ ] **Embedding model** chosen with justification — model: `_____`, alternatives compared: `_____`
@@ -85,6 +96,8 @@ Fill this file as the project evolves. Every checkbox is a piece of interview ev
 - [ ] **Prompt cache economics** understood (cache write 1.25× read; breakeven at 2 hits)
 - [ ] **Batch API** used for eval runs on historical data (50% discount)
 - [ ] **Tool result caching** within an incident (topology, deploy list)
+- [x] **Response-cache semantics are a named mode, not a TTL number** — `eval` unbounded (that *is* reproducibility), `production` 900 s, `disabled`; expirations counted apart from misses so an aged-out cache is distinguishable from prompts that stopped repeating ([§40](./TRADEOFFS.md#40-three-cache-semantics-and-why-the-gateway-refuses-semantic-matching))
+- [x] **Able to say why the gateway cache is never semantic**: two 0.97-similar prompts can need opposite answers, and a fuzzy hit would corrupt eval while every metric looked healthy
 - [ ] **Cost degradation path** when per-investigation budget hit — gateway refuses the call, harness emits an "insufficient evidence" report
 - [ ] Data point ready: "median cost per investigation: $X. Broken down: main loop $A, refute sub-loop $B, judge $C."
 - [ ] Data point ready: "gateway cache hit rate $X% — nightly eval over ~30 cases costs $Y instead of $Z"

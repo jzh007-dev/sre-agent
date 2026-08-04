@@ -1,0 +1,67 @@
+# Alert dedup thresholds — the numbers behind DIAGNOSIS P6a's rules R0-R5.
+#
+# The rules themselves live in `agent/core/dedup.py` and their *order* is the
+# policy; this file only sets the thresholds they compare against. Durations use
+# Prometheus syntax (`5m`, `90s`, `1h`) because every other duration an SRE reads in
+# this stack does.
+#
+# Loaded by `agent/triggers/policy.py`. `DedupPolicy`'s dataclass defaults mirror
+# these values, so `agent/core/` stays runnable with no config file at all — the
+# kernel must not require a YAML file to be parseable.
+
+severity:
+  # Best to worst. Escalation moves one step left and stops at the head: unbounded
+  # `severity + 1` on repeated recurrence eventually pages everyone, which is
+  # indistinguishable from having no severity at all.
+  #
+  # A severity that is *not* on this ladder is treated as the most severe, so it can
+  # never be suppressed, and every decision it produces is flagged
+  # `severity_unrecognised` — a fail-open that is counted rather than silent.
+  order: [P1, P2, P3, P4]
+
+dedup:
+  # R2 — a report this recently delivered makes a re-alert noise rather than news.
+  repeat_suppress: 5m
+
+  # R3 — recurrence between `repeat_suppress` and here means the fix did not take,
+  # so the condition reopens one severity higher. Past this, it is a fresh incident
+  # at its own severity (R5), not a recurrence.
+  recurrence_window: 10m
+
+  # R3 — arrivals of this key (including ones R2 dropped) before recurrence counts
+  # as recurrence rather than as a straggler. Dropped arrivals count on purpose:
+  # they are the evidence that the condition kept firing.
+  recurrence_min_arrivals: 3
+
+burst:
+  # R4 — sources whose alerts carry NO duration semantics of their own.
+  #
+  # Prometheus `for:` already turns "one scrape breached" into "it breached for a
+  # minute", and every rule in `mock/prometheus/alerts.yml` sets `for: 1m`, so
+  # `alertmanager` is deliberately absent here — aggregating what has already been
+  # aggregated just adds latency to a real signal.
+  #
+  # `log_pattern` is the source that would need it, and nothing emits one yet: R4 is
+  # exercised by tests and has no golden case behind it. Recorded as a coverage gap
+  # in DIAGNOSIS rather than left to look load-bearing.
+  sources: [log_pattern]
+  window: 2m
+  threshold: 3
+
+  # Only these are ever held. A P1 is never held for a window — that is the whole
+  # asymmetry: an unnecessary investigation costs a budget, a delayed P1 costs an
+  # outage.
+  hold_severities: [P3, P4]
+
+storm:
+  # Concurrent investigations past which further distinct keys stop forking a budget
+  # each and are aggregated into one fleet-wide event.
+  #
+  # This is the *budget-layer* cap — protecting tokens, which is our half of the
+  # division of labour in TRADEOFFS §38. AlertManager's `group_wait` protects the
+  # human. W2 L4c's correlation cap (stop scoring O(n²) alert pairs) reads the same
+  # counter.
+  #
+  # R0 (escalation) and R3 (recurrence) are checked *before* this, so a storm can
+  # never cause an escalation to be lost.
+  max_concurrent: 8

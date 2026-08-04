@@ -42,7 +42,7 @@ The full rationale, tradeoffs, and interview-mapped depth points are in the docs
 
 **Week 1 done** — the target environment the agent observes is live: 13 real containers (7 microservices + Prometheus + AlertManager + ClickHouse + Vector + Redis), real fault injection, and 8 golden cases that reproduce real incidents end-to-end.
 
-**Week 2 in progress** — the agent skeleton. Loop, gateway (routing / cache / cost / budget), and the traceability spine are in: 233 tests, all offline except the two commands that deliberately hit a live provider. See [docs/ROADMAP.md](./docs/ROADMAP.md) for the 7-week plan and current pointer.
+**Week 2 in progress** — the agent skeleton. Loop, gateway (routing / cache / cost / budget), the traceability spine, and the trigger registry with layered alert dedup are in: 363 tests, all offline except the two commands that deliberately hit a live provider. See [docs/ROADMAP.md](./docs/ROADMAP.md) for the 7-week plan and current pointer.
 
 ## Shape
 

@@ -24,6 +24,7 @@ from agent.core.events import (
     TurnStarted,
 )
 from agent.core.investigation import Investigation, ToolBudget, Window
+from agent.triggers.alert import investigation_from_payload
 from agent.core.loop import run, run_to_completion
 from agent.llm.stub import StubLLM
 from agent.llm.types import Message, Response, StopReason, TextBlock, ToolUseBlock
@@ -40,7 +41,7 @@ FAKE_ALERT = {
 
 
 def _alert_investigation(**kwargs: Any) -> Investigation:
-    return Investigation.from_alert(FAKE_ALERT, t0=T0, **kwargs)
+    return investigation_from_payload(FAKE_ALERT, t0=T0, **kwargs)
 
 
 def _chat_investigation() -> Investigation:

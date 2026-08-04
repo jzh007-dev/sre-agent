@@ -37,6 +37,7 @@ from agent.store.jsonl import (
     split_runs,
 )
 from agent.tools.stubs import default_tool_registry
+from agent.triggers.alert import investigation_from_payload
 
 T0 = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
 
@@ -90,7 +91,7 @@ def _three_turn_script() -> list[Response]:
 
 class TestRoundTrip(unittest.IsolatedAsyncioTestCase):
     async def _run(self, root: str, script=None) -> tuple[Investigation, list[dict[str, Any]]]:
-        inv = Investigation.from_alert(ALERT, t0=T0, budget=ToolBudget(max_turns=8))
+        inv = investigation_from_payload(ALERT, t0=T0, budget=ToolBudget(max_turns=8))
         log = InvestigationLog(inv, root).open()
         trace = Trace(trace_id=inv.id, correlation_id=inv.correlation_id, sinks=[log.span])
 

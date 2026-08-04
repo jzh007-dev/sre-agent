@@ -1,1 +1,59 @@
-# Placeholder — W2 L4. severity -> ToolBudget tier (max_turns, max_tool_calls, max_cost_usd).
+# Severity -> ToolBudget tier. Loaded by `agent/triggers/policy.py`.
+#
+# These are ceilings the code sets and the model spends against; the model never
+# raises them (ARCHITECTURE — who decides what). Severity is where the money
+# decision belongs: a P1 outage is worth ten times a P4's tokens, and before this
+# file existed every trigger got the same `ToolBudget()` defaults.
+#
+# **The values are policy set before any measurement exists** — hypotheses under
+# TRADEOFFS §30, not targets. W2 L8 publishes the measured median turns / tool calls
+# / cost per investigation under stub tools, and W3 L4's precompute layer moves them
+# again. Whatever L8 measures is what should set these; until then the P2 row is
+# deliberately identical to `ToolBudget()`'s defaults so nothing changed silently
+# when tiering arrived.
+#
+# `max_cost` is per currency and never converted (TRADEOFFS §36: currency conversion
+# was removed, because an exchange rate makes a wrong rate indistinguishable from a
+# price change). A provider billing in a currency with no ceiling here raises at the
+# gate rather than running unbounded.
+#
+# An alert whose severity is not on the ladder in `alerting.yaml` gets `default`,
+# **not** the top tier. The two asymmetries point in different directions on purpose:
+# an unorderable severity must never be *suppressed*, but handing it the largest
+# budget would let one mislabelled alert storm spend the most money in the system.
+
+default: P2
+
+tiers:
+  P1:
+    max_turns: 20
+    max_tool_calls: 60
+    max_cost: {USD: 0.80, CNY: 6.00}
+  P2:
+    max_turns: 15
+    max_tool_calls: 40
+    max_cost: {USD: 0.40, CNY: 3.00}
+  P3:
+    max_turns: 8
+    max_tool_calls: 20
+    max_cost: {USD: 0.15, CNY: 1.20}
+  P4:
+    max_turns: 6
+    max_tool_calls: 12
+    max_cost: {USD: 0.08, CNY: 0.60}
+
+# Non-alert triggers have no severity to tier on.
+triggers:
+  # A human is waiting, and a chat turn that spends forty tool calls has already
+  # failed at being a conversation.
+  chat:
+    max_turns: 8
+    max_tool_calls: 12
+    max_cost: {USD: 0.10, CNY: 0.80}
+  # Per *target*, not per patrol run: patrol's one earned contribution so far is that
+  # it forced budgets to be per-investigation (TRADEOFFS §31). Fifty targets at the
+  # P2 tier would be a fifty-fold bill for a scheduled sweep nobody asked for.
+  patrol:
+    max_turns: 5
+    max_tool_calls: 8
+    max_cost: {USD: 0.05, CNY: 0.40}

@@ -20,7 +20,7 @@ from typing import Any
 
 from ..core.trace import Trace
 from .anthropic import AnthropicAdapter
-from .cache import FileStore, MemoryStore, ResponseCache
+from .cache import CacheMode, FileStore, MemoryStore, ResponseCache
 from .credentials import api_key, configured_providers
 from .gateway import Gateway
 from .openai_compat import OpenAICompatAdapter
@@ -139,6 +139,7 @@ def live_gateway(
     routing: RoutingConfig | None = None,
     *,
     cache_path: str | None = None,
+    cache_mode: CacheMode = "eval",
     trace: Trace | None = None,
     allow_fallback: bool = True,
     max_concurrency: int = 4,
@@ -152,6 +153,14 @@ def live_gateway(
     `cache_path` turns on the file-backed response cache. That is the wiring eval
     wants — the expensive scenario is not one run, it is the same run repeated after
     a one-line prompt edit.
+
+    `cache_mode` defaults to `eval` because every live caller today is either
+    `srectl smoke` or the eval runner, and for those an unbounded cache *is* the
+    reproducibility guarantee ([TRADEOFFS §40](../../TRADEOFFS.md#40-three-cache-semantics-and-why-the-gateway-refuses-semantic-matching)).
+    W2 L7's ingress must pass `production`, where an identical prompt a week later
+    should not hit a cache the world has moved past. The mode a run used comes back
+    in `Gateway.cache.stats()`, so getting it wrong is visible in the ledger rather
+    than silent.
 
     `trace` is the fallback for callers with no loop above them; a loop installs its
     own and that one wins. See `Gateway.active_trace`.
@@ -184,7 +193,7 @@ def live_gateway(
     return Gateway(
         routing=config,
         transports=transports,
-        cache=ResponseCache(store=store),
+        cache=ResponseCache.for_mode(store, cache_mode),
         trace=trace,
         allow_fallback=allow_fallback,
     )

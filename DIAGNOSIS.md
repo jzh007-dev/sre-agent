@@ -85,20 +85,31 @@ Both conditions are required. Downstream-with-later-onset is not a root — that
 
 Two separate mechanisms, often conflated. Both are rule-based with no model involved, and the **order of the rules is the policy**.
 
-#### P6a — Deduplication (same fingerprint)
+#### P6a — Deduplication (same condition)
 
-Ordered; first match wins. The fingerprint comes from AlertManager rather than being recomputed, and **excludes `severity`** — including it would make a P2→P1 escalation of one condition look like two different alerts, breaking both dedup and R3.
+Ordered; first match wins. The key comes from AlertManager rather than being recomputed, and **excludes `severity`** — including it would make a P2→P1 escalation of one condition look like two different alerts, breaking both dedup and R3.
+
+Which of AlertManager's two identifiers satisfies both halves of that sentence was **measured** in W2 L4b, and it is not the one this document originally named: `alerts[].fingerprint` hashes every label including `severity`, so the key is **`groupKey`**. Per-member fingerprints are still carried. Full evidence in [TRADEOFFS §38a](./TRADEOFFS.md#38a-the-dedup-key-is-groupkey-not-alertsfingerprint--measured-w2-l4b).
 
 | # | Condition | Decision | Why |
 |---|---|---|---|
 | **R0** | incoming severity **higher** than what was already delivered | **new, never suppressed** | Dropping a P1 because a P2 shipped five minutes ago would prolong an outage. This precedes every suppression rule. |
-| R1 | same fingerprint, investigation in flight | **join** | Do not fork what is being investigated. |
-| R2 | same fingerprint, delivered, Δ < 5 min | **drop** | The report just went out; re-alerting only pages twice. |
-| R3 | delivered, 5-10 min, count ≥ 3 | **new, severity raised** | Recurrence right after a report means the fix did not take. A returning incident is worse than a first occurrence. |
+| R1 | same key, investigation in flight | **join** | Do not fork what is being investigated. |
+| R2 | same key, delivered, Δ < 5 min | **drop** | The report just went out; re-alerting only pages twice. |
+| R3 | delivered, 5-10 min, arrivals ≥ 3 | **new, severity raised** | Recurrence right after a report means the fix did not take. A returning incident is worse than a first occurrence. |
 | R4 | low severity, window count below threshold | **hold** | A single warning is noise; N in a window is a signal, and **the aggregate carries a higher severity than any member**. Scoped to sources without their own `for:` semantics — Prometheus `for:` already does this for metric alerts, so only log-pattern alerts need it. |
 | R5 | otherwise | **new** | |
 
 Held alerts must be **flushed and counted** at window expiry rather than silently dropped, and escalation needs a ceiling — unbounded `severity+1` on repeated recurrence eventually pages everyone.
+
+**Four readings the table leaves implicit**, settled when the rules were implemented in W2 L4b:
+
+1. **R0's condition is "higher than what was already *delivered*"**, so an escalation arriving while an investigation is still running does not match R0 — it matches R1, which **joins and raises that investigation's severity and budget in place**. Nothing is suppressed, so R0's guarantee holds, and one condition still produces one report; forking would spend two budgets on one fault. (`Investigation.budget` is re-read every loop iteration, so the bigger ceiling applies from the next turn.)
+2. **R3 counts arrivals *since the last report*, not over the key's lifetime.** A lifetime counter sits permanently above the threshold after the third arrival ever, so every later recurrence would reopen escalated and `≥ 3` would stop meaning anything.
+3. **`resolved` is a pre-rule, not a suppression rule** — a state transition, checked before R0. In flight → join, and the self-healing is handed over as evidence about the fault. Not in flight → drop, counted, hold buffer cleared. A `resolved` webhook may never *create* an investigation, and it does not count as an arrival (otherwise a flapping condition would reach R3's threshold on its recoveries).
+4. **Both suppression rules fail open on a delivery timestamp in the future** — a replayed sequence or a stepped clock. A negative elapsed time is not evidence that a report just went out.
+
+**Storm cap, at this layer**: past N concurrent investigations, the *first* excess condition opens one fleet-wide aggregate and every later one **joins** it, so 40 conditions under a cap of 8 spend 9 budgets rather than 40. R0 and R3 are checked before the cap, so a storm can never bury the one alert that got worse. The correlation-layer cap (stop scoring O(n²) pairs) is P6b's, in W2 L4c.
 
 #### P6b — Correlation (different fingerprints, one fault)
 
@@ -118,7 +129,7 @@ Edges carry `required` (a degradable dependency should not propagate correlation
 **Storm cap**: past N alerts, stop correlating and report "fleet-wide event, N services affected" — which is the most useful conclusion anyway, and avoids O(n²) pairwise scoring.
 
 - **Maps to**: `GS-P-DEPENDENCY-DOWN-001`. Note the fixture currently carries **one** alert; the four-alert cascade is what the live stack produces, so W2 L4c reshapes it to a real AlertManager webhook, adds the sibling alerts, and records the **expected grouping** rather than only a count.
-- **Lands**: P6a in W2 L4b, P6b in W2 L4c. Similarity-based recognition of *repeat* incidents waits for W4's episodic memory — and may only **inform, never suppress** ([§41](./TRADEOFFS.md#41-semantic-similarity-may-inform-it-may-never-suppress)).
+- **Lands**: P6a **landed** in W2 L4b (`agent/core/dedup.py`, thresholds in `config/alerting.yaml`), P6b in W2 L4c. Similarity-based recognition of *repeat* incidents waits for W4's episodic memory — and may only **inform, never suppress** ([§41](./TRADEOFFS.md#41-semantic-similarity-may-inform-it-may-never-suppress)).
 - **Measured by**: `correlation_accuracy` against the expected grouping, and `correlation_overridden_rate` — how often the agent rejects a merge. Like `precompute_override_rate` it reads both ways: too high means the topology or threshold is wrong, near-zero means the agent may be rubber-stamping.
 
 ---
@@ -226,7 +237,9 @@ Any rule without a case behind it is an assertion, not a method.
 | P1 timeline | all | deterministic (ordering present in evidence) |
 | P2 topology | `GS-P-DEPENDENCY-DOWN-001` | deterministic |
 | P5 cascade root vs symptom | `GS-P-DEPENDENCY-DOWN-001` | deterministic (expected root) |
-| P6 alert grouping | `GS-P-DEPENDENCY-DOWN-001` | deterministic (`expected_investigation_count`) |
+| P6a dedup R0-R3, R5 | none — **unit-tested only**, and mutation-tested | deterministic (`tests/agent/test_dedup.py`) |
+| P6a dedup R4 (burst) | **no case and no source — gap** | — |
+| P6b alert grouping | `GS-P-DEPENDENCY-DOWN-001` | deterministic (`expected_investigation_count`) |
 | D1 CHANGE activate | `GS-CHANGE-001-token-upgrade` | judge + deterministic |
 | D1 CHANGE prune / no-deploy | `GS-LOAD-001` *(backlog)* | deterministic (hallucination checker) |
 | D2 RES | `GS-RES-001-redis-oom` | judge |
@@ -238,10 +251,12 @@ Any rule without a case behind it is an assertion, not a method.
 | D7 stop rule | needs a genuinely-underdetermined case — **gap** | judge |
 | Report contract | all | `human_first_action` alignment |
 
-**Two known gaps**, recorded rather than glossed:
+**Three known gaps**, recorded rather than glossed:
 
-1. **D3 pruning** has no case — nothing in the set has a local onset preceding its downstream's. `GS-P-IO-LATENCY-001` is the closest and could be extended.
-2. **D7** needs a case that is genuinely undetermined, where `confidence: "unknown"` is the *correct* answer. Every current case has a knowable answer, so the set cannot currently detect an agent that never admits uncertainty.
+1. **R4 has no alert source to fire on.** Every rule in `mock/prometheus/alerts.yml` sets `for: 1m`, so Prometheus has already done the "N in a window" work and aggregating again would only add latency to a real signal. `config/alerting.yaml` therefore opts in exactly one source — `log_pattern` — and nothing emits one yet. The rule is implemented, unit-tested and reachable by config; it is **not** exercised by anything the stack currently produces, and it stays in the ordered set because the *order* is the policy and a hole in the middle of it would be worse than an unused branch. Closes when log-pattern alerting exists (W3 L2 brings the ClickHouse query surface it would need).
+
+2. **D3 pruning** has no case — nothing in the set has a local onset preceding its downstream's. `GS-P-IO-LATENCY-001` is the closest and could be extended.
+3. **D7** needs a case that is genuinely undetermined, where `confidence: "unknown"` is the *correct* answer. Every current case has a knowable answer, so the set cannot currently detect an agent that never admits uncertainty.
 
 Also note that **three rules (D1-prune, D4, D5) all depend on `GS-LOAD-001`, which is in `eval/backlog/`** and not yet runnable. That is now the strongest argument for realising it earlier than Week 6.
 

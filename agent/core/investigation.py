@@ -9,8 +9,10 @@ system to one of its three entry modes.
 buys four things that are each expensive to retrofit:
 
 - **chat can resume** — append a user message and run the loop again,
-- **alert storms can be absorbed** — a later correlated alert appends into an
-  in-flight investigation instead of forking a fourth one (W5),
+- **alert storms can be absorbed** — a later alert for a condition already under
+  investigation appends into it instead of forking a second budget. That is dedup
+  rule R1 in `core/dedup.py`, wired in W2 L4b; correlation across *different*
+  conditions is L4c,
 - **the JSONL store has something to serialize** (W2 L7),
 - **a future Temporal migration has something to checkpoint** (W6-W7).
 """
@@ -21,7 +23,7 @@ import json
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Literal, Mapping
 
 from ..llm.types import Message, TextBlock
@@ -169,13 +171,25 @@ class Investigation:
         return self.trigger in REPORT_REQUIRED_TRIGGERS
 
     def add_user_text(self, text: str) -> None:
-        """Append a user turn.
+        """Append user-side text, **merging into a trailing user message**.
 
-        This is the chat resume path and, in W5, the alert-storm absorption path
-        — a correlated alert arriving mid-flight is just another user message on
-        an existing investigation.
+        This is the chat resume path and the alert-storm absorption path — a
+        correlated alert or a `resolved` notification arriving mid-flight is just
+        more user-side input on an existing investigation.
+
+        The merge is what makes the mid-flight case safe. Mid-investigation the last
+        message is the `user` message carrying the turn's `tool_result` blocks, and
+        appending a *second* consecutive user message produces a `messages` array
+        that some providers reject outright. Adding a `TextBlock` to the existing
+        message is legal everywhere: a user message may hold tool results followed by
+        text, and Anthropic's only ordering requirement is that the tool results come
+        first.
         """
-        self.messages.append(Message(role="user", content=[TextBlock(text=text)]))
+        block = TextBlock(text=text)
+        if self.messages and self.messages[-1].role == "user":
+            self.messages[-1].content.append(block)
+            return
+        self.messages.append(Message(role="user", content=[block]))
 
     def record_tool_call(
         self, name: str, args_hash: str = "", result: str | None = None
@@ -246,82 +260,12 @@ class Investigation:
                 return f"per-tool ceiling reached for {name} ({used}/{cap})"
         return None
 
-    @classmethod
-    def from_alert(
-        cls,
-        alert: Mapping[str, Any],
-        *,
-        t0: datetime | None = None,
-        budget: ToolBudget | None = None,
-        integration: str | None = None,
-    ) -> Investigation:
-        """Build an alert-triggered investigation from a webhook payload.
 
-        Relocates to `triggers/alert.py` in W2 L4, where fingerprint dedup and
-        severity-to-budget-tier mapping join it. It lives here for L2 so the loop
-        has something real to run against.
+def mint_id() -> str:
+    """A fresh investigation id.
 
-        `t0` is the incident's start, not the current time — the window derives
-        from when the alert fired. Real AlertManager payloads carry `startsAt`;
-        the golden fixtures are static and have none, so callers pass `t0`
-        explicitly and the wall clock is only a last resort.
-        """
-        anchor = t0 or _alert_start_time(alert) or datetime.now(timezone.utc)
-        inv = cls(
-            id=f"inv_{uuid.uuid4().hex[:12]}",
-            trigger="alert",
-            window=Window.around(anchor),
-            budget=budget or ToolBudget(),
-            integration=integration,
-            correlation_id=_alert_correlation_id(alert),
-        )
-        inv.add_user_text(f"<alert>\n{json.dumps(strip_fixture_metadata(alert), ensure_ascii=False, indent=2)}\n</alert>")
-        return inv
-
-
-def strip_fixture_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Drop keys beginning with `_` before a payload can reach the model.
-
-    Not cosmetic. Every golden case's `alert.json` carries a `_meta.purpose`
-    written for human readers, and those descriptions *state the root cause*
-    ("Redis bgsave failed under memory pressure, session writes rejected").
-    Passing the payload through verbatim would hand the agent the answer and
-    silently invalidate every accuracy number the eval suite produces — a
-    failure that looks like success, which is the worst kind.
-
-    The rule is structural rather than a `_meta` special case: anything
-    underscore-prefixed is fixture bookkeeping and never crosses into a prompt.
+    Here rather than in a trigger because every trigger mints one and the format is
+    read by `srectl replay`, the JSONL store and the trace — one owner, three
+    consumers.
     """
-    return {k: v for k, v in payload.items() if not k.startswith("_")}
-
-
-def _alert_correlation_id(alert: Mapping[str, Any]) -> str:
-    """The alert's own correlation id, from `commonAnnotations`.
-
-    Read from the annotation rather than recomputed, for the same reason the
-    fingerprint will be taken from AlertManager in L4b: a second definition of an
-    identifier is a second thing that can disagree. Every Week-1 golden fixture
-    carries one, and `mock/services/_shared/observability.py` propagates the same id
-    by header, which is what makes the join possible at all.
-
-    Empty when absent — the trace still works, it just cannot be joined to the
-    observed system's logs, and that is worth reading as a missing annotation on the
-    alert rule rather than as an agent-side failure.
-    """
-    annotations = alert.get("commonAnnotations")
-    if isinstance(annotations, Mapping):
-        value = annotations.get("correlation_id")
-        if isinstance(value, str):
-            return value
-    return ""
-
-
-def _alert_start_time(alert: Mapping[str, Any]) -> datetime | None:
-    """Best-effort T0 from an AlertManager-shaped payload."""
-    raw = alert.get("startsAt")
-    if not isinstance(raw, str):
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    return f"inv_{uuid.uuid4().hex[:12]}"

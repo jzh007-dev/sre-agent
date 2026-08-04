@@ -23,13 +23,34 @@ delta 3.
 The key comes from `LLMRequest.cache_key()`, which includes the tool schemas —
 omitting them would let a changed tool set hit a stale entry, and wrong-but-cheap
 is the worst possible outcome for an evaluation system.
+
+**Matching is exact and never semantic.** Two prompts 0.97 "similar" can differ by
+one number and require opposite conclusions, and a fuzzy hit here would silently
+corrupt eval while every metric looked healthy — [TRADEOFFS §40](../../TRADEOFFS.md#40-three-cache-semantics-and-why-the-gateway-refuses-semantic-matching).
+A lower hit rate costs money; a wrong hit costs correctness.
+
+**Mode, and why it is not one setting.** §40's analysis exposed a real gap: the cache
+had no TTL and no eval/production distinction. Those want opposite things.
+
+| Mode | TTL | Because |
+|---|---|---|
+| `eval` | none | An unbounded cache **is** the reproducibility guarantee. A rerun must replay the same responses however long after the fact. |
+| `production` | short (15 min) | An identical prompt a week later would hit while the world has moved on. Within one investigation a hit is right — a retry, or two parallel identical calls. |
+| `disabled` | — | For a live run that must not reuse anything. |
+
+An expired entry counts as a **miss and an expiration**, so a hit rate that dropped
+because entries aged out is distinguishable from one that dropped because prompts
+stopped repeating. Without that split, a TTL set too short looks exactly like a
+prefix-ordering bug.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
-from dataclasses import asdict, dataclass
-from typing import Any, Protocol
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable, Literal, Protocol
 
 from .types import Message, Response, StopReason, TextBlock, ToolResultBlock, ToolUseBlock
 from .usage import PRICE_TABLE_VERSION, Cost, Usage
@@ -54,6 +75,11 @@ class CacheEntry:
     cost: Cost
     model_id: str
     price_table_version: str = PRICE_TABLE_VERSION
+    #: Epoch seconds, for the production TTL. Zero means "written before entries were
+    #: timestamped", which reads as age-infinite: kept in eval (where nothing
+    #: expires) and expired in production. That is the safe direction — an old entry
+    #: is reused where reuse is the point and refused where freshness is.
+    stored_at: float = 0.0
 
 
 class CacheStore(Protocol):
@@ -119,14 +145,67 @@ class FileStore:
         return len(self._index)
 
 
+#: Which of §40's two answers this cache is giving. Not a bool, because "no TTL" and
+#: "15-minute TTL" are not two settings of one knob — they are two different jobs, and
+#: naming the job is what stops production from silently inheriting eval's semantics.
+CacheMode = Literal["eval", "production", "disabled"]
+
+#: Production TTL. Bounded by roughly how long an investigation lives: inside one, an
+#: identical prompt is a retry or a parallel duplicate and a hit is correct. Across
+#: days it is a stale answer about a system that has since changed.
+DEFAULT_PRODUCTION_TTL = 900.0
+
+
 @dataclass
 class ResponseCache:
-    """Thin policy wrapper over a store, with hit/miss counters for the exit table."""
+    """Thin policy wrapper over a store, with the counters the exit table asks for.
+
+    `mode` is the §40 decision; `ttl` is derived from it by `for_mode` and can be
+    overridden for a test or an unusual run. `enabled` stays as the mechanical switch
+    the gateway already flips, and `disabled` mode sets it — two names for one state
+    would be worse than one name used from two places.
+    """
 
     store: CacheStore
     enabled: bool = True
+    mode: CacheMode = "eval"
+    #: Seconds an entry stays valid, or None for unbounded.
+    ttl: float | None = None
     hits: int = 0
     misses: int = 0
+    #: Entries found but too old. Counted separately from `misses` so an aged-out
+    #: cache is distinguishable from a cache whose prompts stopped repeating.
+    expirations: int = 0
+    #: Injected, as `transport.py` injects its sleeper: TTL behaviour is most of what
+    #: there is to test here and it must be testable without sleeping.
+    clock: Callable[[], float] = field(default=time.time)
+
+    @classmethod
+    def for_mode(
+        cls,
+        store: CacheStore,
+        mode: CacheMode = "eval",
+        *,
+        ttl: float | None = None,
+        clock: Callable[[], float] = time.time,
+    ) -> ResponseCache:
+        """Build a cache with the TTL its mode implies.
+
+        `eval` is unbounded on purpose: [EVAL.md](../../EVAL.md) principle 5 makes a
+        run reproducible given `(seed, model_version, prompt_version,
+        golden_set_version)`, and an expiring cache would make it reproducible given
+        those *and the date*, which is not reproducible at all.
+        """
+        resolved = ttl
+        if resolved is None and mode == "production":
+            resolved = DEFAULT_PRODUCTION_TTL
+        return cls(
+            store=store,
+            enabled=mode != "disabled",
+            mode=mode,
+            ttl=resolved,
+            clock=clock,
+        )
 
     def get(self, key: str) -> CacheEntry | None:
         if not self.enabled:
@@ -135,17 +214,48 @@ class ResponseCache:
         if entry is None:
             self.misses += 1
             return None
+        if self.expired(entry):
+            self.expirations += 1
+            self.misses += 1
+            return None
         self.hits += 1
         return entry
 
+    def expired(self, entry: CacheEntry) -> bool:
+        """Whether an entry is too old to serve.
+
+        An entry with no timestamp (`stored_at == 0.0`) is treated as infinitely old
+        rather than as brand new — the direction that refuses to serve something whose
+        age is unknown, in the mode that cares about age.
+        """
+        if self.ttl is None:
+            return False
+        return (self.clock() - entry.stored_at) > self.ttl
+
     def put(self, key: str, entry: CacheEntry) -> None:
-        if self.enabled:
-            self.store.put(key, entry)
+        if not self.enabled:
+            return
+        if not entry.stored_at:
+            # Stamped here rather than at every call site: a cache whose TTL depends
+            # on each caller remembering to timestamp is a cache with no TTL.
+            entry = dataclasses.replace(entry, stored_at=self.clock())
+        self.store.put(key, entry)
 
     @property
     def hit_rate(self) -> float:
         total = self.hits + self.misses
         return self.hits / total if total else 0.0
+
+    def stats(self) -> dict[str, Any]:
+        """What the ledger summary and the eval row report."""
+        return {
+            "mode": self.mode,
+            "ttl_seconds": self.ttl,
+            "hits": self.hits,
+            "misses": self.misses,
+            "expirations": self.expirations,
+            "hit_rate": round(self.hit_rate, 4),
+        }
 
 
 # --------------------------------------------------------------------------- #
@@ -165,6 +275,7 @@ def _entry_to_json(entry: CacheEntry) -> dict[str, Any]:
         "cost": asdict(entry.cost),
         "model_id": entry.model_id,
         "price_table_version": entry.price_table_version,
+        "stored_at": entry.stored_at,
     }
 
 
@@ -178,6 +289,10 @@ def _entry_from_json(raw: dict[str, Any]) -> CacheEntry:
         cost=_cost_from_json(raw),
         model_id=raw["model_id"],
         price_table_version=raw.get("price_table_version", "unknown"),
+        # Absent in files written before entries were timestamped. Zero, not "now":
+        # inventing a fresh timestamp on read would make every old entry look new
+        # forever, which is a TTL that never expires anything with extra steps.
+        stored_at=float(raw.get("stored_at") or 0.0),
     )
 
 
@@ -227,7 +342,9 @@ def _block_from_json(raw: dict[str, Any]) -> Any:
 
 __all__ = [
     "CacheEntry",
+    "CacheMode",
     "CacheStore",
+    "DEFAULT_PRODUCTION_TTL",
     "FileStore",
     "MemoryStore",
     "ResponseCache",

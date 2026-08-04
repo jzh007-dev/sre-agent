@@ -6,12 +6,19 @@ requires-python = ">=3.11"
 
 # Runtime dependencies are added by the lesson that needs them, not up front:
 #   W2 L3  openai, anthropic, langfuse   (gateway + adapters)
-#   W2 L5  mcp, pyyaml, jsonpath-ng      (MCP transport + integration config)
+#   W2 L4b pyyaml                        (config/alerting.yaml, config/budgets.yaml)
+#   W2 L5  mcp, jsonpath-ng              (MCP transport + integration config)
 #   W2 L7  fastapi, uvicorn, click       (ingress + srectl)
 #   W4     psycopg, pgvector, sentence-transformers
 # L2 is stdlib only, deliberately: the skeleton should be runnable before any
 # provider account exists.
-dependencies = []
+#
+# pyyaml arrived one lesson early — it was scheduled for L5 with the integration
+# config, and L4b's dedup thresholds and budget tiers are config for the same reason:
+# a threshold that lives in Python is a threshold nobody tunes. `agent/core/` still
+# imports nothing from here (`DedupPolicy`'s dataclass defaults mirror the YAML), so
+# the kernel stays runnable with no config file present at all.
+dependencies = ["pyyaml>=6.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

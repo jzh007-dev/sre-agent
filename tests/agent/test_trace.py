@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agent.core.investigation import Investigation, ToolBudget, Window
+from agent.triggers.alert import investigation_from_payload
 from agent.core.loop import run, run_to_completion
 from agent.core.trace import (
     ATTEMPT,
@@ -109,7 +110,7 @@ class TestSpanLevels(unittest.IsolatedAsyncioTestCase):
     async def test_investigation_and_turn_spans_nest(self):
         trace, spans = _tracked()
         llm = StubLLM(script=[_response(TextBlock(text="checking"), _submit())])
-        inv = Investigation.from_alert(ALERT, t0=T0)
+        inv = investigation_from_payload(ALERT, t0=T0)
 
         await run_to_completion(inv, llm=llm, tools=default_tool_registry(), trace=trace)
 
@@ -126,7 +127,7 @@ class TestSpanLevels(unittest.IsolatedAsyncioTestCase):
         every JSON log line the mock services emit."""
         trace, spans = _tracked()
         llm = StubLLM(script=[_response(_submit())])
-        inv = Investigation.from_alert(ALERT, t0=T0)
+        inv = investigation_from_payload(ALERT, t0=T0)
 
         self.assertEqual(inv.correlation_id, "gs-res-001-redis-oom")
         await run_to_completion(inv, llm=llm, tools=default_tool_registry(), trace=trace)
@@ -138,8 +139,8 @@ class TestSpanLevels(unittest.IsolatedAsyncioTestCase):
         """Two investigations from one alert share a correlation id and must not
         share a trace id — L4b's R3 rule mints exactly that pair, and a rerun of a
         golden case does too."""
-        first = Investigation.from_alert(ALERT, t0=T0)
-        second = Investigation.from_alert(ALERT, t0=T0)
+        first = investigation_from_payload(ALERT, t0=T0)
+        second = investigation_from_payload(ALERT, t0=T0)
 
         self.assertEqual(first.correlation_id, second.correlation_id)
         self.assertNotEqual(first.id, second.id)
@@ -159,7 +160,7 @@ class TestSpanLevels(unittest.IsolatedAsyncioTestCase):
                 _response(_submit()),
             ]
         )
-        inv = Investigation.from_alert(ALERT, t0=T0)
+        inv = investigation_from_payload(ALERT, t0=T0)
         tools = {**default_tool_registry(), "query_metrics": SlowTool()}
 
         await run_to_completion(inv, llm=llm, tools=tools, trace=trace)
@@ -183,7 +184,7 @@ class TestSpanLevels(unittest.IsolatedAsyncioTestCase):
                 _response(_submit()),
             ]
         )
-        inv = Investigation.from_alert(ALERT, t0=T0)
+        inv = investigation_from_payload(ALERT, t0=T0)
 
         await run_to_completion(inv, llm=llm, tools=default_tool_registry(), trace=trace)
 
@@ -204,7 +205,7 @@ class TestOutcomeIsAlwaysRecorded(unittest.IsolatedAsyncioTestCase):
     async def test_done_stamps_the_root_span(self):
         trace, spans = _tracked()
         llm = StubLLM(script=[_response(_submit())])
-        inv = Investigation.from_alert(ALERT, t0=T0)
+        inv = investigation_from_payload(ALERT, t0=T0)
 
         await run_to_completion(inv, llm=llm, tools=default_tool_registry(), trace=trace)
 
@@ -226,7 +227,7 @@ class TestOutcomeIsAlwaysRecorded(unittest.IsolatedAsyncioTestCase):
                 Response(stop_reason=StopReason.END_TURN, content=[TextBlock(text="dunno")]),
             ]
         )
-        inv = Investigation.from_alert(ALERT, t0=T0)
+        inv = investigation_from_payload(ALERT, t0=T0)
 
         await run_to_completion(inv, llm=llm, tools=default_tool_registry(), trace=trace)
 
@@ -244,7 +245,7 @@ class TestOutcomeIsAlwaysRecorded(unittest.IsolatedAsyncioTestCase):
             _response(ToolUseBlock(id=f"t{i}", name="query_metrics", input={"promql": f"q{i}"}))
             for i in range(4)
         ]
-        inv = Investigation.from_alert(
+        inv = investigation_from_payload(
             ALERT, t0=T0, budget=ToolBudget(max_turns=2, repeat_tool_calls=0)
         )
 
@@ -272,7 +273,7 @@ class TestAmbientContext(unittest.IsolatedAsyncioTestCase):
     async def test_the_run_restores_the_previous_ambient_state(self):
         trace, _ = _tracked()
         llm = StubLLM(script=[_response(_submit())])
-        inv = Investigation.from_alert(ALERT, t0=T0)
+        inv = investigation_from_payload(ALERT, t0=T0)
 
         await run_to_completion(inv, llm=llm, tools=default_tool_registry(), trace=trace)
 
@@ -304,7 +305,7 @@ class TestAmbientContext(unittest.IsolatedAsyncioTestCase):
                 _response(_submit()),
             ]
         )
-        inv = Investigation.from_alert(ALERT, t0=T0)
+        inv = investigation_from_payload(ALERT, t0=T0)
 
         stream = run(inv, llm=llm, tools=default_tool_registry(), trace=trace)
         # A Task gets its own copy of the context, so the span opened in here is

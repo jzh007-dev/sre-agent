@@ -8,10 +8,12 @@ in a code review.
 
 Two tiers:
 
-- **pure core** — `loop.py`, `investigation.py`, `events.py`, `trace.py` may import
-  stdlib, their siblings, and protocol/policy modules. Naming any concrete
+- **pure core** — `loop.py`, `investigation.py`, `events.py`, `trace.py`, `dedup.py`
+  may import stdlib, their siblings, and protocol/policy modules. Naming any concrete
   implementation fails the build. `trace.py` is here rather than among the seams
-  because a *sink* is pluggable and the span model is not.
+  because a *sink* is pluggable and the span model is not; `dedup.py` is here because
+  the rule *order* is the policy and it must not be able to reach a YAML parser, a
+  clock, or an alert payload format.
 - **harness** — may additionally reach each seam's registry, since dispatching
   through registries is its job. Naming a concrete implementation still fails.
 
@@ -46,7 +48,7 @@ HARNESS_EXTRA_ALLOWED = (
     "agent.store.jsonl",
 )
 
-PURE_CORE = ("loop.py", "investigation.py", "events.py", "trace.py")
+PURE_CORE = ("loop.py", "investigation.py", "events.py", "trace.py", "dedup.py")
 HARNESS = ("harness.py",)
 
 

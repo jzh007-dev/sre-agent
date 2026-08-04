@@ -578,7 +578,7 @@ routing ─→ construction ─→ │ budget gate ─→ transport │ ─→ p
 
 - **Why these are genuinely different**: `group_wait` exists to protect a human's attention; our correlation exists to protect a token budget. And `inhibit_rules` requires the causal relationship to be **declared in advance** — which is precisely the thing an SRE agent is supposed to work out. Our topology-based correlation does what inhibition cannot: infer adjacency from the service graph rather than from hand-written pairs.
 - **What we take from it rather than rebuild**:
-  - **The fingerprint.** A real AlertManager webhook carries `alerts[].fingerprint`. Computing our own would be a second, divergent definition of "the same alert". Note the Week-1 golden fixtures are a simplified PD-shaped payload and carry *no* `alerts[]`, `fingerprint`, `startsAt` or `status` — which is also why `Investigation.from_alert` currently falls back to the wall clock. Fixing the fixture shape lands with W2 L4c.
+  - **The group key** — see the measured correction below. The first version of this entry said "the fingerprint", which turned out to be the wrong one of AlertManager's two identifiers.
   - **Declared inhibition runs first.** Known causality (`up{service=X}==0` ⇒ every `HighErrorRate` on X is a symptom) is more certain than any score. Scoring only handles what inhibition does not cover.
 - **Alternatives**:
   - (A) Do correlation entirely in AlertManager with more `inhibit_rules`.
@@ -586,6 +586,27 @@ routing ─→ construction ─→ │ budget gate ─→ transport │ ─→ p
 - **Why not (A)**: it caps us at causality someone already wrote down, which is the opposite of the project's premise. Why not (B): it throws away a correct fingerprint and the group key.
 - **Cost**: two systems now have opinions about grouping, and a confusing interaction is possible — AlertManager may batch four alerts into one webhook while our correlator also wants to join them. The resolution is that a single webhook carrying several alerts is *already* one investigation, and correlation only runs across webhooks.
 - **Reconsider when**: AlertManager grows topology-aware grouping (it has not, and its design does not point that way).
+
+### 38a. The dedup key is `groupKey`, not `alerts[].fingerprint` — measured, W2 L4b
+
+This entry and [DIAGNOSIS P6a](./DIAGNOSIS.md) together asserted two things that cannot both be true of `alerts[].fingerprint`: that the identity *comes from AlertManager* and that it *excludes `severity`*. Rather than pick a reading, a real `prom/alertmanager:v0.27.0` — the version `mock/docker-compose.yml` pins — was run with a webhook receiver and one condition was posted at P2, then at P1:
+
+| Field | Observed | Consequence |
+|---|---|---|
+| `alerts[].fingerprint` | `327b605fce1b794f` at P2, **`3277605fce179078` at P1** | `Alert.Fingerprint()` hashes every label, `severity` included |
+| `groupKey` | `{}:{alertname="HighErrorRate", service="auth"}` | severity-free under any sane `group_by` |
+| grouping | both severities arrived in **one** webhook, under that one `groupKey` | AlertManager already treats them as one condition |
+| `commonLabels` | in that webhook, **`severity` was absent** | it is not common to the members, so it is dropped |
+| resolved | `status: "resolved"`, same `groupKey`, member carries a real `endsAt` | `resolved` is a state transition on the same key |
+| firing `endsAt` | `"0001-01-01T00:00:00Z"` | Go's zero time; parses cleanly into year 1 |
+
+- **Decision**: the dedup key is **`groupKey`**; per-member `fingerprint`s are recorded verbatim for the join to AlertManager's own notification log and to the incident tracker, both of which key on them. This is *more* faithful to "consume, don't reinvent" than the original wording — `groupKey` is AlertManager's own definition of one notification group, whereas a hash of our own over the labels-minus-severity would have been the rival identity this entry exists to avoid.
+- **The two questions are different**, which is why both identifiers exist and why using the wrong one is silent: `fingerprint` answers *"is this the same alert instance?"*, `groupKey` answers *"is this the same condition?"*. Dedup asks the second.
+- **What keying on `fingerprint` would have cost**: a P2→P1 escalation of one condition arrives under a different key, so R0 has nothing to compare severities against and R3 has nothing to count arrivals on. Both rules would look implemented, pass their own unit tests, and never fire in production. Mutation-tested: switching the key to the fingerprint fails 10 tests.
+- **Severity is read per member and the worst wins.** Reading it from `commonLabels` works on every single-severity webhook and returns *nothing* on a mixed one — so it would fail precisely when an escalation happens, which is the one case R0 exists for.
+- **The residual risk, and how it is surfaced**: `groupKey` inherits the operator's `group_by`. If someone puts `severity` in it, our key silently regains severity. Their config is not ours to read, but the key is a readable string — so a key containing `severity=` sets `key_contains_severity` on every decision, and the agent is told in its prompt that a recurrence of that condition will not be recognised.
+- **Cost**: two identifiers to carry instead of one, and a *derived* key for sources that send no `groupKey` (the Week-1 fixtures, which carry no `alerts[]`, `groupKey`, `startsAt` or `status`). Derived keys are prefixed `derived:` so a log grep answers "how often are we guessing?", and the member `fingerprint` is left **empty rather than invented**. W2 L4c reshapes the fixtures.
+- **Reconsider when**: a source sends neither identifier, or AlertManager changes `groupKey`'s format (it is part of the documented webhook contract, so this is unlikely).
 
 ## 39. Merging is advisory, not destructive
 
@@ -607,7 +628,15 @@ routing ─→ construction ─→ │ budget gate ─→ transport │ ─→ p
 | Semantic reuse | embedding cosine | required | depends entirely on use — see [§41](#41-semantic-similarity-may-inform-it-may-never-suppress) | investigation layer only, advisory |
 
 - **Why the gateway must stay exact**: semantic caching is a well-known pattern (GPTCache and similar) and it is wrong here. Two prompts that are 0.97 "similar" can differ by one tool result or one number and require opposite conclusions. A semantic hit at the gateway would silently corrupt eval results while every metric looked healthy — the same failure class as [§30](#30-unmeasured-targets-are-labelled-hypotheses) and the golden-set `_meta` leak, and this project keeps finding it.
-- **A gap this analysis exposed**: `ResponseCache` currently has **no TTL and no eval/production distinction**. For eval, no TTL is exactly right — that *is* reproducibility. For chat it is wrong: an identical prompt a week later hits the cache while the world has moved on. So the cache needs a mode — unbounded in eval, short-TTL or disabled in production. Scheduled W2 L4b.
+- **A gap this analysis exposed, closed in W2 L4b**: `ResponseCache` had **no TTL and no eval/production distinction**. For eval, no TTL is exactly right — that *is* reproducibility. For chat it is wrong: an identical prompt a week later hits the cache while the world has moved on. So the cache now has a **mode**, and it is a named mode rather than a TTL number, because "unbounded" and "15 minutes" are not two settings of one knob — they are two jobs:
+
+| Mode | TTL | Why |
+|---|---|---|
+| `eval` (default) | none | An unbounded cache **is** the reproducibility guarantee. A TTL would make a run reproducible given `(seed, model_version, prompt_version, golden_set_version)` *and the date*, which is not reproducible. |
+| `production` | 900 s | Bounded by roughly how long an investigation lives. Inside one, an identical prompt is a retry or a parallel duplicate and a hit is correct; across days it is a stale answer about a system that has changed. |
+| `disabled` | — | A live run that must not reuse anything. |
+
+  Two details that make the mode honest rather than decorative. **An expired entry counts as an expiration as well as a miss**, so a hit rate that fell because entries aged out is distinguishable from one that fell because prompts stopped repeating — without the split, a TTL set too short looks exactly like a prefix-ordering bug. And **an entry written before entries were timestamped reads as age-infinite**, so it is served in `eval` (where reuse is the point) and refused in `production` (where freshness is); inventing a fresh timestamp on read would be a TTL that never expires anything, with extra steps. `live_gateway(cache_mode=…)` selects it, `Gateway.cache.stats()` reports which mode a run used, and W2 L7's ingress must pass `production`.
 - **Cost**: an exact-match cache has a lower hit rate than a semantic one. Accepted: a lower hit rate costs money, a wrong hit costs correctness.
 - **Reconsider when**: never for the gateway. Semantic matching belongs where a human or the agent can reject the match, not where it silently substitutes an answer.
 

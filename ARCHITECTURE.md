@@ -363,7 +363,7 @@ Whether we need Temporal-grade or JSONL-grade durability is a measurement, not a
 
 - **Postgres**: cost ledger, audit log, investigation index, tenant meta.
 - **pgvector**: episodic memory (past investigations + embeddings) + runbook chunks, both namespaced per integration (see [RAG.md](./RAG.md)).
-- **Redis**: alert fingerprints for dedup/correlation, gateway response cache, hot topology.
+- **Redis**: the dedup ledger (keyed on AlertManager's `groupKey` — see [TRADEOFFS §38a](./TRADEOFFS.md#38a-the-dedup-key-is-groupkey-not-alertsfingerprint--measured-w2-l4b)), gateway response cache, hot topology. **Tier 2.** At Tier 1.5 the ledger is in process memory, and a restart therefore forgets suppression state — which fails safe, since an alert that would have been dropped creates an investigation instead.
 
 #### Memory layering
 
@@ -477,7 +477,7 @@ otherwise the outage takes out the tooling that explains it.
 
 1. **Ingress** — alert POST → auth → `alert_id` idempotency check → create `Investigation` → spawn asyncio task.
 2. **① route** — trigger registry says `alert`; integration registry matches `observability.yaml` on the alert's labels.
-3. **② preprocess** — fingerprint dedup against Redis; correlation window check (does this join an in-flight investigation instead of starting one?); severity → budget tier.
+3. **② preprocess** — dedup on AlertManager's `groupKey` through the ordered rules R0-R5 (is this an escalation that must never be suppressed? does it join an investigation already in flight? was a report for it just delivered?); severity → budget tier; then correlation across *different* conditions.
 4. **③ loadout** — assemble the tool bundle from the integration's MCP server; compute `Investigation.window` (T0−30m → T0+5m); build `ToolBudget`; assemble the layered system prompt (`[A]` methodology → `[B]` output contract → `[C]` integration facet → `[D]` budget), ordered so `[A][B]` form a stable cache prefix.
 5. **④ loop** — ReAct. Each iteration: gateway call → assistant response → zero-or-more `tool_use` blocks dispatched in parallel → `tool_result` blocks appended. A real trace on `GS-RES-001-redis-oom` might run: `search_similar_incidents` → sees a Redis-OOM precedent → `query_metrics(redis_memory_used_bytes)` → `query_logs(service=auth, level=error)` → `search_runbook(auth, "session write fail")` → `spawn_refute` → `submit_report`. **No fixed sequence** — the mix and order depend on evidence found. Every query inherits the window from step ③.
 6. **⑤ parse** — read the schema-validated `Report` from the `submit_report` call: `root_cause`, `confidence`, `evidence`, `ruled_out`, `recommended_next_step`, `open_questions`, `assumptions`, `undo_path`.
