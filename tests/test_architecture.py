@@ -52,6 +52,16 @@ PURE_CORE = ("loop.py", "investigation.py", "events.py", "trace.py", "dedup.py")
 HARNESS = ("harness.py",)
 
 
+def _is_module(dotted: str) -> bool:
+    """Whether `agent.x.y` is a module on disk.
+
+    Checked against the filesystem rather than by importing: this test reads source with
+    `ast` precisely so it costs nothing and needs no dependency installed.
+    """
+    base = REPO / pathlib.Path(*dotted.split("."))
+    return base.with_suffix(".py").is_file() or (base / "__init__.py").is_file()
+
+
 def _agent_imports(path: pathlib.Path) -> list[tuple[str, int]]:
     """Every `agent.*` module this file imports, with line numbers.
 
@@ -64,8 +74,21 @@ def _agent_imports(path: pathlib.Path) -> list[tuple[str, int]]:
     reports as a bare `agent.core` and the classifier can say nothing about *what*
     was imported, which is both a false positive on a legal sibling import and no
     information at all on an illegal one.
+
+    `from ..triggers import registry` is the same imprecision one level along, and it
+    is resolved the same way: if an imported name is a module on disk, report
+    `agent.triggers.registry` rather than the bare package. **Strictly more precise,
+    never more permissive** — `from ..triggers import alert` now reports
+    `agent.triggers.alert` and is rejected, where before it reported `agent.triggers`
+    and was rejected for the wrong reason. Importing a package *root* is still caught,
+    by both this classifier and `test_core_never_imports_the_tools_package_root`.
     """
-    tree = ast.parse(path.read_text(), filename=str(path))
+    return _imports_of_source(path.read_text(), path)
+
+
+def _imports_of_source(source: str, path: pathlib.Path) -> list[tuple[str, int]]:
+    """The parsing half, split out so a test can feed it a synthetic module."""
+    tree = ast.parse(source, filename=str(path))
     package = ".".join(path.relative_to(REPO).with_suffix("").parts[:-1])
     found: list[tuple[str, int]] = []
 
@@ -84,7 +107,13 @@ def _agent_imports(path: pathlib.Path) -> list[tuple[str, int]]:
             if node.module is None:
                 targets = [".".join([*base, alias.name]) for alias in node.names]
             else:
-                targets = [".".join([*base, node.module]) if node.level else node.module]
+                prefix = ".".join([*base, node.module]) if node.level else node.module
+                submodules = [
+                    f"{prefix}.{alias.name}"
+                    for alias in node.names
+                    if _is_module(f"{prefix}.{alias.name}")
+                ]
+                targets = submodules or [prefix]
 
             for target in targets:
                 if target.startswith("agent"):
@@ -140,6 +169,31 @@ class TestSeamRule(unittest.TestCase):
             any(resolved == a or resolved.startswith(a) for a in PURE_CORE_ALLOWED),
             "agent.llm.openai_compat must not be classified as allowed",
         )
+
+    def test_a_submodule_import_resolves_to_the_submodule(self):
+        """`from ..triggers import registry` must report `agent.triggers.registry`.
+
+        The resolver was sharpened in L6a-1 because it reported the bare package, which
+        made a legal registry import fail while saying nothing about *what* was
+        imported. This asserts the sharpening did not become permissive: the allowed
+        sibling resolves precisely, and a concrete sibling in the same statement is
+        still caught.
+        """
+        source = (
+            "from ..triggers import registry\n"
+            "from ..triggers import alert\n"
+            "from ..tools import bundle, stubs\n"
+        )
+        path = REPO / "agent" / "core" / "_synthetic_for_test.py"
+        found = {module for module, _ in _imports_of_source(source, path)}
+        self.assertIn("agent.triggers.registry", found)
+        self.assertIn("agent.triggers.alert", found)
+        self.assertIn("agent.tools.bundle", found)
+        self.assertIn("agent.tools.stubs", found)
+
+        allowed = PURE_CORE_ALLOWED + HARNESS_EXTRA_ALLOWED
+        rejected = {m for m in found if not any(m == a or m.startswith(a) for a in allowed)}
+        self.assertEqual(rejected, {"agent.triggers.alert", "agent.tools.stubs"})
 
 
 class TestLayout(unittest.TestCase):

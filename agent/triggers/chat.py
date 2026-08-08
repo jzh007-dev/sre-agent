@@ -39,6 +39,12 @@ class ChatTrigger:
 
     kind = "chat"
 
+    #: A chat answer goes back to the person who asked, not to an alerting surface —
+    #: paging a channel because someone asked a question is how a copilot gets muted.
+    #: Streaming back to the caller is the real delivery (post-W5); `stdout` is what a
+    #: CLI session sees today.
+    sinks = ("stdout",)
+
     def __init__(
         self,
         *,

@@ -181,6 +181,11 @@ class AlertTrigger:
 
     kind = "alert"
 
+    #: An alert's report goes to a human's attention surface. `stdout` is the only one
+    #: registered today; the other two are named so the binding is the real one rather
+    #: than a placeholder, and `registry.resolve` skips what is not installed.
+    sinks = ("stdout", "slack", "jira")
+
     def __init__(
         self,
         *,

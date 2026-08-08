@@ -134,3 +134,25 @@ class LLM(Protocol):
         propagates.
         """
         ...
+
+
+class LLMFactory(Protocol):
+    """Binds an `LLM` to one investigation and one assembled system prompt.
+
+    Declared here, in the module the seam test lets `agent/core/` import, because the
+    harness has to bind the LLM itself rather than receive one already bound. The reason
+    is specific: the system prompt does **not** travel through `LLM.call` — it is bound
+    at construction, by `Gateway.bind(inv, kind, system=…)`. So a harness handed a
+    finished `LLM` could not own step ③'s prompt assembly, and prompt assembly would
+    have to move out of the pipeline it belongs to.
+
+    `prompt` is typed loosely on purpose. Its real type is `llm.request.SystemPrompt`,
+    which `agent/core/` may not name — and it must stay a structured object rather than
+    a string, because `PromptFragment.stable_across` is what places the cache
+    breakpoints that W2 L3b measured as a 94.9% saving on a warm call. Flattening it to
+    text to get it across this boundary would spend that to satisfy a type annotation.
+
+    `Gateway.bind` already satisfies this shape, so nothing has to implement it.
+    """
+
+    def __call__(self, inv: Any, prompt: Any) -> LLM: ...

@@ -35,6 +35,11 @@ class PatrolTrigger:
 
     kind = "patrol"
 
+    #: A sweep's findings are a digest, not N pages. Aggregation across the fan-out is
+    #: post-W5 work; until then each target's result prints, which is honest about the
+    #: fact that patrol has no aggregation yet rather than hiding it behind a sink name.
+    sinks = ("stdout",)
+
     def __init__(
         self,
         *,

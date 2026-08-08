@@ -62,12 +62,24 @@ class TriggerOutcome:
 class Trigger(Protocol):
     """One entry mode.
 
-    Deliberately narrow. A trigger may not run the loop, choose tools, or write to a
-    sink — those are steps ③④⑥ and they are shared. What varies between alert, chat
-    and patrol is only *what an investigation is made of*.
+    Deliberately narrow. A trigger may not run the loop, choose tools, or deliver to a
+    sink — those are steps ③④⑥ and they are shared. What varies between alert, chat and
+    patrol is only *what an investigation is made of*, and *where its result belongs*.
+
+    Two members, matching [ARCHITECTURE §2](../../ARCHITECTURE.md): each trigger
+    contributes a pre-processor for step ② **and a default sink binding for step ⑥**.
     """
 
     kind: TriggerKind
+
+    #: Sink names harness ⑥ delivers to, in order. Names rather than `Sink` objects, so
+    #: the trigger layer never imports the sink layer — two seams that do not know about
+    #: each other can be replaced independently, which is the whole point of both.
+    #:
+    #: A name with no registered sink is skipped and reported, not fatal: a deployment
+    #: without Slack should still print to stdout. L5a lets an integration's `notifier`
+    #: list override this.
+    sinks: tuple[str, ...]
 
     def preprocess(self, payload: Mapping[str, Any]) -> TriggerOutcome: ...
 
